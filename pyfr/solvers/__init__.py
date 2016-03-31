@@ -3,6 +3,7 @@
 from pyfr.integrators import get_integrator
 from pyfr.solvers.base import BaseSystem
 from pyfr.solvers.euler import EulerSystem
+from pyfr.solvers.mhd import MHDSystem
 from pyfr.solvers.navstokes import NavierStokesSystem
 from pyfr.util import subclass_where
 
