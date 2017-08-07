@@ -5,7 +5,7 @@ import numpy as np
 from pyfr.inifile import Inifile
 from pyfr.plugins.base import BasePlugin
 from pyfr.nputil import npeval
-from pyfr.writers.native import NativeWriter
+from pyfr.writers.native import CollectiveWriter
 
 
 class TavgPlugin(BasePlugin):
@@ -31,8 +31,8 @@ class TavgPlugin(BasePlugin):
         # Output file directory, base name, and writer
         basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
         basename = self.cfg.get(cfgsect, 'basename')
-        self._writer = NativeWriter(intg, len(self.exprs), basedir, basename,
-                                    prefix='tavg')
+        self._writer = CollectiveWriter(intg, len(self.exprs), basedir,
+                                        basename, prefix='tavg')
 
         # Time averaging parameters
         self.dtout = self.cfg.getfloat(cfgsect, 'dt-out')

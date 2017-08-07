@@ -10,9 +10,8 @@ import numpy as np
 from pyfr.mpiutil import get_comm_rank_root
 
 
-class NativeWriter(object):
-    def __init__(self, intg, nvars, basedir, basename, *, prefix,
-                 extn='.pyfrs'):
+class BaseNativeWriter(object):
+    def __init__(self, intg, nvars, basedir, basename, prefix, extn):
         # Base output directory and file name
         self.basedir = basedir
         self.basename = basename
@@ -29,6 +28,45 @@ class NativeWriter(object):
 
         # Copy the float type
         self.fpdtype = intg.backend.fpdtype
+
+    def _get_name_for_data(self, etype, prank):
+        return '{0}_{1}_p{2}'.format(self.prefix, etype, prank)
+
+    def _restore_nout(self):
+        nout = 0
+
+        # See if the basename appears to depend on {n}
+        if re.search('{n[^}]*}', self.basename):
+            # Quote and substitute
+            bn = re.escape(self.basename)
+            bn = re.sub(r'\\{n[^}]*\\}', r'(\s*\d+\s*)', bn)
+            bn = re.sub(r'\\{t[^}]*\\}', r'(?:.*?)', bn) + '$'
+
+            for f in os.listdir(self.basedir):
+                m = re.match(bn, f)
+                if m:
+                    nout = max(nout, int(m.group(1)) + 1)
+
+        return nout
+
+    def write(self, data, metadata, tcurr):
+        # Determine the output path
+        path = self._get_output_path(tcurr)
+
+        # Delegate to _write to do the actual outputting
+        self._write(path, data, metadata)
+
+        # Increment the output number
+        self.nout += 1
+
+        # Return the path
+        return path
+
+
+class CollectiveWriter(BaseNativeWriter):
+    def __init__(self, intg, nvars, basedir, basename, *, prefix,
+                 extn='.pyfrs'):
+        super().__init__(intg, nvars, basedir, basename, prefix, extn)
 
         # MPI info
         comm, rank, root = get_comm_rank_root()
@@ -83,67 +121,32 @@ class NativeWriter(object):
                             mpi_rreqs.append(rreq)
                             mpi_names.append(name)
 
-    def write(self, data, metadata, tcurr):
-        # Determine the output path
-        path = self._get_output_path(tcurr)
-
-        # Delegate to _write to do the actual outputting
-        self._write(path, data, metadata)
-
-        # Increment the output number
-        self.nout += 1
-
-        # Return the path
-        return path
-
-    def _restore_nout(self):
-        nout = 0
-
-        # See if the basename appears to depend on {n}
-        if re.search('{n[^}]*}', self.basename):
-            # Quote and substitute
-            bn = re.escape(self.basename)
-            bn = re.sub(r'\\{n[^}]*\\}', r'(\s*\d+\s*)', bn)
-            bn = re.sub(r'\\{t[^}]*\\}', r'(?:.*?)', bn) + '$'
-
-            for f in os.listdir(self.basedir):
-                m = re.match(bn, f)
-                if m:
-                    nout = max(nout, int(m.group(1)) + 1)
-
-        return nout
-
     def _get_output_path(self, tcurr):
         # Substitute {t} and {n} for the current time and output number
         fname = self.basename.format(t=tcurr, n=self.nout)
 
         return os.path.join(self.basedir, fname)
 
-    def _get_name_for_data(self, etype, prank):
-        return '{}_{}_p{}'.format(self.prefix, etype, prank)
 
     def _write_parallel(self, path, data, metadata):
         comm, rank, root = get_comm_rank_root()
 
-        with h5py.File(path, 'w', driver='mpio', comm=comm) as h5file:
+        with h5py.File(path, 'w', driver='mpio', comm=comm) as f:
             dmap = {}
             for name, shape in self._global_shape_list:
-                dmap[name] = h5file.create_dataset(
-                    name, shape, dtype=self.fpdtype
-                )
+                dmap[name] = f.create_dataset(name, shape, dtype=self.fpdtype)
 
-            for s, dat in zip(self._loc_names, data):
-                dmap[s][:] = dat
+            for name, dat in zip(self._loc_names, data):
+                dmap[name][:] = dat
 
             # Metadata information has to be transferred to all the ranks
             if rank == root:
-                mmap = [(k, len(v.encode()))
-                        for k, v in metadata.items()]
+                mmap = [(k, len(v.encode())) for k, v in metadata.items()]
             else:
                 mmap = None
 
             for name, size in comm.bcast(mmap, root=root):
-                d = h5file.create_dataset(name, (), dtype='S{}'.format(size))
+                d = f.create_dataset(name, (), dtype='S{0}'.format(size))
 
                 if rank == root:
                     d.write_direct(np.array(metadata[name], dtype='S'))
@@ -166,12 +169,40 @@ class NativeWriter(object):
             dats = it.chain(data, self._mpi_rbufs)
 
             # Convert any metadata to ASCII
-            metadata = {k: np.array(v, dtype='S')
-                        for k, v in metadata.items()}
+            metadata = {k: np.array(v, dtype='S') for k, v in metadata.items()}
 
             # Create the output dictionary
             outdict = dict(zip(names, dats), **metadata)
 
-            with h5py.File(path, 'w') as h5file:
+            with h5py.File(path, 'w') as f:
                 for k, v in outdict.items():
-                    h5file[k] = v
+                    f[k] = v
+
+
+class DistributedWriter(BaseNativeWriter):
+    def __init__(self, intg, nvars, basedir, basename, *, prefix,
+                 extn='.pyfrs', prank=None, etypes=None):
+        super().__init__(intg, nvars, basedir, basename, prefix, extn)
+
+        prank = prank if prank is not None else intg.rallocs.prank
+        etypes = etypes if etypes is not None else intg.system.ele_types
+
+        self._prank = prank
+        self._names = [self._get_name_for_data(et, prank) for et in etypes]
+
+    def _get_output_path(self, tcurr):
+        # Substitute {t}, {n}, and {p}
+        fname = self.basename.format(t=tcurr, n=self.nout, p=self._prank)
+
+        return os.path.join(self.basedir, fname)
+
+    def _write(self, path, data, metadata):
+        # Convert any metadata to ASCII
+        metadata = {k: np.array(v, dtype='S') for k, v in metadata.items()}
+
+        # Create the output dictionary
+        outdict = dict(zip(self._names, data), **metadata)
+
+        with h5py.File(path, 'w') as f:
+            for k, v in outdict.items():
+                f[k] = v

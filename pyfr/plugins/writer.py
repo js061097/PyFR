@@ -2,7 +2,7 @@
 
 from pyfr.inifile import Inifile
 from pyfr.plugins.base import BasePlugin
-from pyfr.writers.native import NativeWriter
+from pyfr.writers.native import CollectiveWriter
 
 
 class WriterPlugin(BasePlugin):
@@ -16,8 +16,8 @@ class WriterPlugin(BasePlugin):
         # Construct the solution writer
         basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
         basename = self.cfg.get(cfgsect, 'basename')
-        self._writer = NativeWriter(intg, self.nvars, basedir, basename,
-                                    prefix='soln')
+        self._writer = CollectiveWriter(intg, self.nvars, basedir, basename,
+                                        prefix='soln')
 
         # Output time step and next output time
         self.dt_out = self.cfg.getfloat(cfgsect, 'dt-out')
