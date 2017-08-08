@@ -20,10 +20,14 @@ class CheckpointPlugin(BasePlugin):
 
         super().__init__(intg, cfgsect, suffix)
 
+        # Backend data type and MPI rank to physical rank map
+        dtype = intg.backend.fpdtype
+        mprankmap = intg.rallocs.mprankmap
+
         # Output frequency
         self.nsteps = self.cfg.getint(cfgsect, 'nsteps')
 
-        dtype = intg.backend.fpdtype
+        # Output directory and name
         basedir = self.cfg.getpath(cfgsect, 'basedir', '.', abs=True)
         basename = self.cfg.get(cfgsect, 'basename')
 
@@ -45,6 +49,18 @@ class CheckpointPlugin(BasePlugin):
                         break
                 else:
                     raise RuntimeError('Unable to construct a buddy scheme')
+
+            fname = self.cfg.get(cfgsect, 'buddy-file')
+            fname = fname if fname.endswith('.csv') else fname + '.csv'
+
+            # Output the buddy list to a CSV file
+            with open(fname, 'w') as f:
+                if self.cfg.getbool(cfgsect, 'header', True):
+                    print('rank,prank,host,rsend,rrecv', file=f)
+
+                rows = zip(range(len(hosts)), mprankmap, hosts, rsend, rrecv)
+                print('\n'.join(','.join(str(c) for c in r) for r in rows),
+                      file=f)
         else:
             rsend = rrecv = None
 
