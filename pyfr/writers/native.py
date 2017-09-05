@@ -3,6 +3,7 @@
 import itertools as it
 import os
 import re
+import uuid
 
 import h5py
 import numpy as np
@@ -131,7 +132,16 @@ class CollectiveWriter(BaseNativeWriter):
     def _write_parallel(self, path, data, metadata):
         comm, rank, root = get_comm_rank_root()
 
-        with h5py.File(path, 'w', driver='mpio', comm=comm) as f:
+        # Generate and broadcast a temporary file name
+        if rank == root:
+            tname = 'tmp-{0}.pyfrs'.format(uuid.uuid4())
+            tpath = os.path.join(self.basedir, tname)
+        else:
+            tpath = None
+
+        tpath = comm.bcast(tpath, root=root)
+
+        with h5py.File(tpath, 'w', driver='mpio', comm=comm) as f:
             dmap = {}
             for name, shape in self._global_shape_list:
                 dmap[name] = f.create_dataset(name, shape, dtype=self.fpdtype)
@@ -151,6 +161,10 @@ class CollectiveWriter(BaseNativeWriter):
                 if rank == root:
                     d.write_direct(np.array(metadata[name], dtype='S'))
 
+        # Move the temporary file into place
+        if rank == root:
+            os.rename(tpath, path)
+
     def _write_serial(self, path, data, metadata):
         from mpi4py import MPI
 
@@ -160,6 +174,9 @@ class CollectiveWriter(BaseNativeWriter):
             for tag, buf in enumerate(data):
                 comm.Send(buf.copy(), root, tag)
         else:
+            tname = 'tmp-{0}.pyfrs'.format(uuid.uuid4())
+            tpath = os.path.join(self.basedir, tname)
+
             # Recv all of the non-local data
             MPI.Prequest.Startall(self._mpi_rreqs)
             MPI.Prequest.Waitall(self._mpi_rreqs)
@@ -174,9 +191,11 @@ class CollectiveWriter(BaseNativeWriter):
             # Create the output dictionary
             outdict = dict(zip(names, dats), **metadata)
 
-            with h5py.File(path, 'w') as f:
+            with h5py.File(tpath, 'w') as f:
                 for k, v in outdict.items():
                     f[k] = v
+
+            os.rename(tpath, path)
 
 
 class DistributedWriter(BaseNativeWriter):
@@ -197,12 +216,17 @@ class DistributedWriter(BaseNativeWriter):
         return os.path.join(self.basedir, fname)
 
     def _write(self, path, data, metadata):
+        tname = 'tmp-{0}.pyfrs'.format(uuid.uuid4())
+        tpath = os.path.join(self.basedir, tname)
+
         # Convert any metadata to ASCII
         metadata = {k: np.array(v, dtype='S') for k, v in metadata.items()}
 
         # Create the output dictionary
         outdict = dict(zip(self._names, data), **metadata)
 
-        with h5py.File(path, 'w') as f:
+        with h5py.File(tpath, 'w') as f:
             for k, v in outdict.items():
                 f[k] = v
+
+        os.rename(tpath, path)
