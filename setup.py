@@ -30,6 +30,8 @@ modules = [
     'pyfr.backends.opencl.kernels',
     'pyfr.backends.openmp',
     'pyfr.backends.openmp.kernels',
+    'pyfr.backends.veo',
+    'pyfr.backends.veo.kernels',
     'pyfr.integrators',
     'pyfr.integrators.dual',
     'pyfr.integrators.dual.phys',
@@ -73,6 +75,7 @@ package_data = {
     'pyfr.backends.cuda.kernels': ['*.mako'],
     'pyfr.backends.opencl.kernels': ['*.mako'],
     'pyfr.backends.openmp.kernels': ['*.mako'],
+    'pyfr.backends.veo.kernels': ['*.mako'],
     'pyfr.integrators.dual.pseudo.kernels': ['*.mako'],
     'pyfr.integrators': ['schemes/*.txt'],
     'pyfr.quadrules': [
