@@ -9,16 +9,8 @@ class VeoKernelGenerator(BaseKernelGenerator):
             inner = '''
                     int cb, ce;
                     loop_sched_1d(_nx, align, &cb, &ce);
-                    int nci = ((ce - cb) / SOA_SZ)*SOA_SZ;
-                    for (int _xi = cb; _xi < cb + nci; _xi += SOA_SZ)
-                    {{
-                        #pragma _NEC ivdep
-                        for (int _xj = 0; _xj < SOA_SZ; _xj++)
-                        {{
-                            {body}
-                        }}
-                    }}
-                    for (int _xi = cb + nci, _xj = 0; _xj < ce - _xi; _xj++)
+                    #pragma _NEC ivdep
+                    for (int _xi = cb; _xi < ce; _xi++)
                     {{
                         {body}
                     }}'''.format(body=self.body)
@@ -26,19 +18,10 @@ class VeoKernelGenerator(BaseKernelGenerator):
             inner = '''
                     int rb, re, cb, ce;
                     loop_sched_2d(_ny, _nx, align, &rb, &re, &cb, &ce);
-                    int nci = ((ce - cb) / SOA_SZ)*SOA_SZ;
                     for (int _y = rb; _y < re; _y++)
                     {{
-                        for (int _xi = cb; _xi < cb + nci; _xi += SOA_SZ)
-                        {{
-                            #pragma _NEC ivdep
-                            for (int _xj = 0; _xj < SOA_SZ; _xj++)
-                            {{
-                                {body}
-                            }}
-                        }}
-                        for (int _xi = cb + nci, _xj = 0; _xj < ce - _xi;
-                             _xj++)
+                        #pragma _NEC ivdep
+                        for (int _xi = cb; _xi < ce; _xi++)
                         {{
                             {body}
                         }}
@@ -46,9 +29,9 @@ class VeoKernelGenerator(BaseKernelGenerator):
 
         return '''{spec}
                {{
-                   #define X_IDX (_xi + _xj)
+                   #define X_IDX (_xi)
                    #define X_IDX_AOSOA(v, nv)\
-                       ((_xi/SOA_SZ*(nv) + (v))*SOA_SZ + _xj)
+                       ((_xi/SOA_SZ*(nv) + (v))*SOA_SZ + _xi % SOA_SZ)
                    int align = PYFR_ALIGN_BYTES / sizeof(fpdtype_t);
                    #pragma omp parallel
                    {{
