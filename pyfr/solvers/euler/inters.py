@@ -13,7 +13,7 @@ class EulerIntInters(BaseAdvectionIntInters):
 
         rsolver = self.cfg.get('solver-interfaces', 'riemann-solver')
         tplargs = dict(ndims=self.ndims, nvars=self.nvars, rsolver=rsolver,
-                       c=self._tpl_c)
+                       c=self.c)
 
         self.kernels['comm_flux'] = lambda: self._be.kernel(
             'intcflux', tplargs=tplargs, dims=[self.ninterfpts],
@@ -30,7 +30,7 @@ class EulerMPIInters(BaseAdvectionMPIInters):
 
         rsolver = self.cfg.get('solver-interfaces', 'riemann-solver')
         tplargs = dict(ndims=self.ndims, nvars=self.nvars, rsolver=rsolver,
-                       c=self._tpl_c)
+                       c=self.c)
 
         self.kernels['comm_flux'] = lambda: self._be.kernel(
             'mpicflux', tplargs, dims=[self.ninterfpts],
@@ -47,7 +47,7 @@ class EulerBaseBCInters(BaseAdvectionBCInters):
 
         rsolver = self.cfg.get('solver-interfaces', 'riemann-solver')
         tplargs = dict(ndims=self.ndims, nvars=self.nvars, rsolver=rsolver,
-                       c=self._tpl_c, bctype=self.type)
+                       c=self.c, bctype=self.type)
 
         self.kernels['comm_flux'] = lambda: self._be.kernel(
             'bccflux', tplargs=tplargs, dims=[self.ninterfpts],
@@ -63,10 +63,14 @@ class EulerSupInflowBCInters(EulerBaseBCInters):
     def __init__(self, be, lhs, elemap, cfgsect, cfg):
         super().__init__(be, lhs, elemap, cfgsect, cfg)
 
-        tplc = self._exp_opts(
+        self.c |= self._exp_opts(
             ['rho', 'p', 'u', 'v', 'w'][:self.ndims + 2], lhs
         )
-        self._tpl_c.update(tplc)
+
+
+class EulerSupOutflowBCInters(EulerBaseBCInters):
+    type = 'sup-out-fn'
+    cflux_state = 'ghost'
 
 
 class EulerCharRiemInvBCInters(EulerBaseBCInters):
@@ -75,10 +79,9 @@ class EulerCharRiemInvBCInters(EulerBaseBCInters):
     def __init__(self, be, lhs, elemap, cfgsect, cfg):
         super().__init__(be, lhs, elemap, cfgsect, cfg)
 
-        tplc = self._exp_opts(
+        self.c |= self._exp_opts(
             ['rho', 'p', 'u', 'v', 'w'][:self.ndims + 2], lhs
         )
-        self._tpl_c.update(tplc)
 
 
 class EulerSlpAdiaWallBCInters(EulerBaseBCInters):

@@ -1,52 +1,52 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import pyopencl as cl
 
 from pyfr.backends.base import (BaseKernelProvider,
-                                BasePointwiseKernelProvider, ComputeKernel)
-import pyfr.backends.opencl.generator as generator
+                                BasePointwiseKernelProvider, Kernel)
+from pyfr.backends.opencl.generator import OpenCLKernelGenerator
+from pyfr.nputil import npdtype_to_ctypestype
 from pyfr.util import memoize
 
 
 class OpenCLKernelProvider(BaseKernelProvider):
     @memoize
+    def _build_program(self, src):
+        return self.backend.cl.program(src, flags=['-cl-fast-relaxed-math'])
+
     def _build_kernel(self, name, src, argtypes):
-        # Compile the source code
-        prg = cl.Program(self.backend.ctx, src)
-        prg.build(['-cl-fast-relaxed-math'])
+        argtypes = [npdtype_to_ctypestype(arg) for arg in argtypes]
 
-        # Retrieve the kernel
-        kern = getattr(prg, name)
-
-        # Set the argument types
-        dtypes = [t if t != np.intp else None for t in argtypes]
-        kern.set_scalar_arg_dtypes(dtypes)
-
-        return kern
+        return self._build_program(src).get_kernel(name, argtypes)
 
 
 class OpenCLPointwiseKernelProvider(OpenCLKernelProvider,
                                     BasePointwiseKernelProvider):
-    kernel_generator_cls = generator.OpenCLKernelGenerator
+    kernel_generator_cls = OpenCLKernelGenerator
 
-    def _instantiate_kernel(self, dims, fun, arglst):
-        cfg = self.backend.cfg
+    def _instantiate_kernel(self, dims, fun, arglst, argmv):
+        rtargs = []
 
-        # Determine the local work size
+        # Determine the work group sizes
         if len(dims) == 1:
-            ls = (cfg.getint('backend-opencl', 'local-size-1d', '64'),)
+            ls = (64,)
+            gs = (dims[0] - dims[0] % -ls[0],)
         else:
-            ls = cfg.getliteral('backend-opencl', 'local-size-2d', '128, 1')
+            ls = (64, 4)
+            gs = (dims[1] - dims[1] % -ls[0], ls[1])
 
-        # Global work size
-        gs = tuple(gi - gi % -li for gi, li in zip(dims[::-1], ls))
+        # Process the arguments
+        for i, k in enumerate(arglst):
+            if isinstance(k, str):
+                rtargs.append((i, k))
+            else:
+                fun.set_arg(i, k)
 
-        class PointwiseKernel(ComputeKernel):
+        class PointwiseKernel(Kernel):
             def run(self, queue, **kwargs):
-                kwargs = {k: float(v) for k, v in kwargs.items()}
-                narglst = [kwargs.get(ka, ka) for ka in arglst]
-                narglst = [getattr(arg, 'data', arg) for arg in narglst]
-                fun(queue.cl_queue_comp, gs, ls, *narglst)
+                for i, k in rtargs:
+                    fun.set_arg(i, kwargs[k])
 
-        return PointwiseKernel()
+                fun.exec_async(queue.cmd_q, gs, ls)
+
+        return PointwiseKernel(*argmv)

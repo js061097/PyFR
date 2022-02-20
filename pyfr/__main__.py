@@ -8,8 +8,6 @@ import os
 import mpi4py.rc
 mpi4py.rc.initialize = False
 
-import h5py
-
 from pyfr.backends import BaseBackend, get_backend
 from pyfr.inifile import Inifile
 from pyfr.mpiutil import register_finalize_handler
@@ -20,7 +18,8 @@ from pyfr.readers import BaseReader, get_reader_by_name, get_reader_by_extn
 from pyfr.readers.native import NativeReader
 from pyfr.solvers import get_solver
 from pyfr.util import subclasses
-from pyfr.writers import BaseWriter, get_writer_by_name, get_writer_by_extn
+from pyfr.writers import (BaseWriter, get_writer_by_name, get_writer_by_extn,
+                          write_pyfrms)
 
 
 def main():
@@ -39,6 +38,8 @@ def main():
     ap_import.add_argument('-t', dest='type', choices=types,
                            help='input file type; this is usually inferred '
                            'from the extension of inmesh')
+    ap_import.add_argument('-l', dest='lintol', type=float, default=1e-5,
+                           help='linearisation tolerance')
     ap_import.set_defaults(process=process_import)
 
     # Partition command
@@ -52,12 +53,14 @@ def main():
     partitioners = sorted(cls.name for cls in subclasses(BasePartitioner))
     ap_partition.add_argument('-p', dest='partitioner', choices=partitioners,
                               help='partitioner to use')
+    ap_partition.add_argument('-r', dest='rnumf', type=FileType('w'),
+                              help='output renumbering file')
+    ap_partition.add_argument('-e', dest='elewts', action='append',
+                              default=[], metavar='shape:weight',
+                              help='element weighting factor')
     ap_partition.add_argument('--popt', dest='popts', action='append',
                               default=[], metavar='key:value',
                               help='partitioner-specific option')
-    ap_partition.add_argument('-t', dest='order', type=int, default=3,
-                              help='target polynomial order; aids in '
-                              'load-balancing mixed meshes')
     ap_partition.set_defaults(process=process_partition)
 
     # Export command
@@ -69,10 +72,14 @@ def main():
     ap_export.add_argument('-t', dest='type', choices=types, required=False,
                            help='output file type; this is usually inferred '
                            'from the extension of outf')
-    ap_export.add_argument('-d', '--divisor', type=int, default=0,
-                           help='sets the level to which high order elements '
-                           'are divided; output is linear between nodes, so '
-                           'increased resolution may be required')
+    output_options = ap_export.add_mutually_exclusive_group(required=False)
+    output_options.add_argument('-d', '--divisor', type=int,
+                                help='sets the level to which high order '
+                                'elements are divided; output is linear '
+                                'between nodes, so increased resolution '
+                                'may be required')
+    output_options.add_argument('-k', '--order', type=int, dest="order",
+                                help='sets the order of high order elements')
     ap_export.add_argument('-g', '--gradients', action='store_true',
                            help='compute gradients')
     ap_export.add_argument('-p', '--precision', choices=['single', 'double'],
@@ -121,12 +128,10 @@ def process_import(args):
         reader = get_reader_by_extn(extn, args.inmesh)
 
     # Get the mesh in the PyFR format
-    mesh = reader.to_pyfrm()
+    mesh = reader.to_pyfrm(args.lintol)
 
     # Save to disk
-    with h5py.File(args.outmesh, 'w') as f:
-        for k, v in mesh.items():
-            f[k] = v
+    write_pyfrms(args.outmesh, mesh)
 
 
 def process_partition(args):
@@ -140,17 +145,22 @@ def process_partition(args):
     else:
         pwts = [1]*int(args.np)
 
+    # Element weights
+    if args.elewts:
+        ewts = {e: int(w) for e, w in (ew.split(':') for ew in args.elewts)}
+    else:
+        ewts = {'quad': 6, 'tri': 3, 'tet': 3, 'hex': 18, 'pri': 10, 'pyr': 6}
+
     # Partitioner-specific options
     opts = dict(s.split(':', 1) for s in args.popts)
 
     # Create the partitioner
     if args.partitioner:
-        part = get_partitioner(args.partitioner, pwts, order=args.order,
-                               opts=opts)
+        part = get_partitioner(args.partitioner, pwts, ewts, opts=opts)
     else:
         for name in sorted(cls.name for cls in subclasses(BasePartitioner)):
             try:
-                part = get_partitioner(name, pwts, order=args.order)
+                part = get_partitioner(name, pwts, ewts)
                 break
             except OSError:
                 pass
@@ -158,7 +168,7 @@ def process_partition(args):
             raise RuntimeError('No partitioners available')
 
     # Partition the mesh
-    mesh, part_soln_fn = part.partition(NativeReader(args.mesh))
+    mesh, rnum, part_soln_fn = part.partition(NativeReader(args.mesh))
 
     # Prepare the solutions
     solnit = (part_soln_fn(NativeReader(s)) for s in args.solns)
@@ -173,9 +183,15 @@ def process_partition(args):
         path = os.path.join(args.outd, os.path.basename(path.rstrip('/')))
 
         # Save to disk
-        with h5py.File(path, 'w') as f:
-            for k, v in data.items():
-                f[k] = v
+        write_pyfrms(path, data)
+
+    # Write out the renumbering table
+    if args.rnumf:
+        print('etype,pold,iold,pnew,inew', file=args.rnumf)
+
+        for etype, emap in sorted(rnum.items()):
+            for k, v in sorted(emap.items()):
+                print(etype, *k, *v, sep=',', file=args.rnumf)
 
 
 def process_export(args):
@@ -196,6 +212,9 @@ def _process_common(args, mesh, soln, cfg):
         from pytools.prefork import enable_prefork
 
         enable_prefork()
+
+    # Work around issues with UCX-derived MPI libraries
+    os.environ['UCX_MEMTYPE_CACHE'] = 'n'
 
     # Import but do not initialise MPI
     from mpi4py import MPI
@@ -225,9 +244,6 @@ def _process_common(args, mesh, soln, cfg):
 
     # Execute!
     solver.run()
-
-    # Finalise MPI
-    MPI.Finalize()
 
 
 def process_run(args):

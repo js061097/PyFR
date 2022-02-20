@@ -26,8 +26,13 @@ class ResidualPlugin(BasePlugin):
             # Open
             self.outf = init_csv(self.cfg, cfgsect, ','.join(header))
 
-        # Call ourself in case output is needed after the first step
-        self(intg)
+        # Prep work if an output is due next step
+        self._prep_next_output(intg)
+
+    def _prep_next_output(self, intg):
+        if (intg.nacptsteps + 1) % self.nsteps == 0:
+            self._prev = [s.copy() for s in intg.soln]
+            self._tprev = intg.tcurr
 
     def __call__(self, intg):
         # If an output is due this step
@@ -53,18 +58,14 @@ class ResidualPlugin(BasePlugin):
                 # Normalise
                 resid = np.sqrt(resid) / (intg.tcurr - self._tprev)
 
-                # Build the row
-                row = [intg.tcurr] + resid.tolist()
-
                 # Write
-                print(','.join(str(r) for r in row), file=self.outf)
+                print(intg.tcurr, *resid, sep=',', file=self.outf)
 
                 # Flush to disk
                 self.outf.flush()
 
             del self._prev, self._tprev
 
-        # If an output is due next step
-        if (intg.nacptsteps + 1) % self.nsteps == 0:
-            self._prev = [s.copy() for s in intg.soln]
-            self._tprev = intg.tcurr
+        # Prep work if an output is due next step
+        self._prep_next_output(intg)
+

@@ -3,7 +3,7 @@
 import numpy as np
 
 from pyfr.backends.openmp.provider import OpenMPKernelProvider
-from pyfr.backends.base import ComputeKernel
+from pyfr.backends.base import Kernel
 
 
 class OpenMPBlasExtKernels(OpenMPKernelProvider):
@@ -12,8 +12,8 @@ class OpenMPBlasExtKernels(OpenMPKernelProvider):
             raise ValueError('Incompatible matrix types')
 
         nv = len(arr)
-        nrow, ncol, ldim, dtype = arr[0].traits
-        ncola, ncolb = arr[0].ioshape[1:]
+        nblocks, nrow, *_, dtype = arr[0].traits
+        ncola = arr[0].ioshape[-2]
 
         # Render the kernel template
         src = self.backend.lookup.get_template('axnpby').render(
@@ -22,62 +22,81 @@ class OpenMPBlasExtKernels(OpenMPKernelProvider):
 
         # Build the kernel
         kern = self._build_kernel('axnpby', src,
-                                  [np.int32]*3 + [np.intp]*nv + [dtype]*nv)
+                                  [np.int32]*2 + [np.intp]*nv + [dtype]*nv)
 
-        class AxnpbyKernel(ComputeKernel):
+        # Set the constant arguments
+        kern.set_args(nrow, nblocks, *arr)
+
+        class AxnpbyKernel(Kernel):
             def run(self, queue, *consts):
-                args = list(arr) + list(consts)
-                kern(nrow, ncolb, ldim, *args)
+                kern.set_args(*consts, start=2 + nv)
+                kern()
 
-        return AxnpbyKernel()
+        return AxnpbyKernel(mats=arr)
 
     def copy(self, dst, src):
         if dst.traits != src.traits:
             raise ValueError('Incompatible matrix types')
 
-        if dst.nbytes >= 2**31:
-            raise ValueError('Matrix too large for copy')
-
         # Render the kernel template
         ksrc = self.backend.lookup.get_template('par-memcpy').render()
 
+        dbbytes, sbbytes = dst.blocksz*dst.itemsize, src.blocksz*src.itemsize
+        bnbytes = src.nrow*src.leaddim*src.itemsize
+        nblocks = src.nblocks
+
         # Build the kernel
-        kern = self._build_kernel('par_memcpy', ksrc,
-                                  [np.intp, np.intp, np.int32])
+        kern = self._build_kernel('par_memcpy', ksrc, 'PiPiii')
+        kern.set_args(dst, dbbytes, src, sbbytes, bnbytes, nblocks)
 
-        class CopyKernel(ComputeKernel):
+        class CopyKernel(Kernel):
             def run(self, queue):
-                kern(dst, src, dst.nbytes)
+                kern()
 
-        return CopyKernel()
+        return CopyKernel(mats=[dst, src])
 
-    def errest(self, x, y, z, *, norm):
-        if x.traits != y.traits != z.traits:
+    def reduction(self, *rs, method, norm, dt_mat=None):
+        if any(r.traits != rs[0].traits for r in rs[1:]):
             raise ValueError('Incompatible matrix types')
 
-        nrow, ncol, ldim, dtype = x.traits
-        ncola, ncolb = x.ioshape[1:]
+        nblocks, nrow, *_, dtype = rs[0].traits
+        ncola = rs[0].ioshape[-2]
+
+        tplargs = dict(norm=norm, ncola=ncola, method=method)
+
+        if method == 'resid':
+            tplargs['dt_type'] = 'matrix' if dt_mat else 'scalar'
 
         # Render the reduction kernel template
-        src = self.backend.lookup.get_template('errest').render(norm=norm,
-                                                                ncola=ncola)
+        src = self.backend.lookup.get_template('reduction').render(**tplargs)
 
-        # Array for the error estimate
-        error = np.zeros(ncola, dtype=dtype)
+        # Array for the reduced data
+        reduced = np.zeros(ncola, dtype=dtype)
+
+        regs = list(rs) + [dt_mat] if dt_mat else rs
+
+        # Argument types for reduction kernel
+        if method == 'errest':
+            argt = [np.int32]*2 + [np.intp]*4 + [dtype]*2
+        elif method == 'resid' and dt_mat:
+            argt = [np.int32]*2 + [np.intp]*4 + [dtype]
+        else:
+            argt = [np.int32]*2 + [np.intp]*3 + [dtype]
 
         # Build
-        rkern = self._build_kernel(
-            'errest', src, [np.int32]*3 + [np.intp]*4 + [dtype]*2,
-            restype=dtype
-        )
+        rkern = self._build_kernel('reduction', src, argt)
+        rkern.set_args(nrow, nblocks, reduced.ctypes.data, *regs)
 
-        class ErrestKernel(ComputeKernel):
+        # Runtime argument offset
+        facoff = argt.index(dtype)
+
+        class ReductionKernel(Kernel):
             @property
             def retval(self):
-                return error
+                return reduced
 
-            def run(self, queue, atol, rtol):
-                rkern(nrow, ncolb, ldim, error.ctypes.data,
-                      x, y, z, atol, rtol)
+            def run(self, queue, *facs):
+                rkern.set_args(*facs, start=facoff)
+                rkern()
 
-        return ErrestKernel()
+        return ReductionKernel(mats=regs)

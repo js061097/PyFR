@@ -5,70 +5,78 @@ from pyfr.solvers.baseadvec import BaseAdvectionSystem
 
 class BaseAdvectionDiffusionSystem(BaseAdvectionSystem):
     def rhs(self, t, uinbank, foutbank):
-        runall = self.backend.runall
-        q1, q2 = self._queues
-        kernels = self._kernels
+        q = self._queue
+        kernels = self._get_kernels(uinbank, foutbank)
+        mpireqs = self._mpireqs
 
-        self._bc_inters.prepare(t)
+        for b in self._bc_inters:
+            b.prepare(t)
 
-        self.eles_scal_upts_inb.active = uinbank
-        self.eles_scal_upts_outb.active = foutbank
+        q.enqueue(kernels['eles/disu'])
+        q.enqueue(kernels['mpiint/scal_fpts_pack'])
+        q.run()
 
-        q1 << kernels['eles', 'disu_ext']()
-        q1 << kernels['mpiint', 'scal_fpts_pack']()
-        runall([q1])
+        if 'eles/copy_soln' in kernels:
+            q.enqueue(kernels['eles/copy_soln'])
+        if 'iint/copy_fpts' in kernels:
+            q.enqueue(kernels['iint/copy_fpts'])
+        q.enqueue(kernels['iint/con_u'])
+        q.enqueue(kernels['bcint/con_u'], t=t)
+        if 'eles/shocksensor' in kernels:
+            q.enqueue(kernels['eles/shocksensor'])
+            q.enqueue(kernels['mpiint/artvisc_fpts_pack'])
+        q.enqueue(kernels['eles/tgradpcoru_upts'])
+        q.run(mpireqs['scal_fpts_send_recv'])
 
-        q1 << kernels['eles', 'disu_int']()
-        if ('eles', 'copy_soln') in kernels:
-            q1 << kernels['eles', 'copy_soln']()
-        if ('iint', 'copy_fpts') in kernels:
-            q1 << kernels['iint', 'copy_fpts']()
-        q1 << kernels['iint', 'con_u']()
-        q1 << kernels['bcint', 'con_u'](t=t)
-        if ('eles', 'shocksensor') in kernels:
-            q1 << kernels['eles', 'shocksensor']()
-            q1 << kernels['mpiint', 'artvisc_fpts_pack']()
-        q1 << kernels['eles', 'tgradpcoru_upts']()
-        q2 << kernels['mpiint', 'scal_fpts_send']()
-        q2 << kernels['mpiint', 'scal_fpts_recv']()
-        q2 << kernels['mpiint', 'scal_fpts_unpack']()
+        q.enqueue(kernels['mpiint/scal_fpts_unpack'])
+        q.enqueue(kernels['mpiint/con_u'])
+        q.enqueue(kernels['eles/tgradcoru_upts'])
+        q.enqueue(kernels['eles/gradcoru_upts_curved'])
+        q.enqueue(kernels['eles/gradcoru_upts_linear'])
+        q.enqueue(kernels['eles/gradcoru_fpts'])
+        q.enqueue(kernels['mpiint/vect_fpts_pack'])
+        q.run(mpireqs['artvisc_fpts_send_recv'])
 
-        runall([q1, q2])
+        if 'eles/shockvar' in kernels:
+            q.enqueue(kernels['mpiint/artvisc_fpts_unpack'])
+        if 'eles/gradcoru_qpts' in kernels:
+            q.enqueue(kernels['eles/gradcoru_qpts'])
+            q.enqueue(kernels['eles/qptsu'])
+        q.enqueue(kernels['eles/tdisf_curved'])
+        q.enqueue(kernels['eles/tdisf_linear'])
+        q.enqueue(kernels['eles/tdivtpcorf'])
+        q.enqueue(kernels['iint/comm_flux'])
+        q.enqueue(kernels['bcint/comm_flux'], t=t)
+        q.run(mpireqs['vect_fpts_send_recv'])
 
-        q1 << kernels['mpiint', 'con_u']()
-        q1 << kernels['eles', 'tgradcoru_upts_ext']()
-        q1 << kernels['eles', 'gradcoru_upts_ext']()
-        q1 << kernels['eles', 'gradcoru_fpts_ext']()
-        q1 << kernels['mpiint', 'vect_fpts_pack']()
-        if ('eles', 'shockvar') in kernels:
-            q2 << kernels['mpiint', 'artvisc_fpts_send']()
-            q2 << kernels['mpiint', 'artvisc_fpts_recv']()
-            q2 << kernels['mpiint', 'artvisc_fpts_unpack']()
+        q.enqueue(kernels['mpiint/vect_fpts_unpack'])
+        q.enqueue(kernels['mpiint/comm_flux'])
+        q.enqueue(kernels['eles/tdivtconf'])
+        q.enqueue(kernels['eles/negdivconf'], t=t)
+        q.run()
 
-        runall([q1, q2])
+    def compute_grads(self, t, uinbank):
+        q = self._queue
+        kernels = self._get_kernels(uinbank, None)
+        mpireqs = self._mpireqs
 
-        q1 << kernels['eles', 'tgradcoru_upts_int']()
-        q1 << kernels['eles', 'gradcoru_upts_int']()
-        q1 << kernels['eles', 'gradcoru_fpts_int']()
-        if ('eles', 'gradcoru_qpts') in kernels:
-            q1 << kernels['eles', 'gradcoru_qpts']()
-        q1 << kernels['eles', 'tdisf']()
-        q1 << kernels['eles', 'tdivtpcorf']()
-        q1 << kernels['iint', 'comm_flux']()
-        q1 << kernels['bcint', 'comm_flux'](t=t)
+        for b in self._bc_inters:
+            b.prepare(t)
 
-        q2 << kernels['mpiint', 'vect_fpts_send']()
-        q2 << kernels['mpiint', 'vect_fpts_recv']()
-        q2 << kernels['mpiint', 'vect_fpts_unpack']()
+        q.enqueue(kernels['eles/disu'])
+        q.enqueue(kernels['mpiint/scal_fpts_pack'])
+        q.run()
 
-        runall([q1, q2])
+        if 'iint/copy_fpts' in kernels:
+            q.enqueue(kernels['iint/copy_fpts'])
+        q.enqueue(kernels['iint/con_u'])
+        q.enqueue(kernels['bcint/con_u'], t=t)
+        q.enqueue(kernels['eles/tgradpcoru_upts'])
+        q.run(mpireqs['scal_fpts_send_recv'])
 
-        q1 << kernels['mpiint', 'comm_flux']()
-        q1 << kernels['eles', 'tdivtconf']()
-        if ('eles', 'tdivf_qpts') in kernels:
-            q1 << kernels['eles', 'tdivf_qpts']()
-            q1 << kernels['eles', 'negdivconf'](t=t)
-            q1 << kernels['eles', 'divf_upts']()
-        else:
-            q1 << kernels['eles', 'negdivconf'](t=t)
-        runall([q1])
+        q.enqueue(kernels['mpiint/scal_fpts_unpack'])
+        q.enqueue(kernels['mpiint/con_u'])
+        q.enqueue(kernels['eles/tgradcoru_upts'])
+        q.enqueue(kernels['eles/gradcoru_upts_curved'])
+        q.enqueue(kernels['eles/gradcoru_upts_linear'])
+        q.run()

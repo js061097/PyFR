@@ -12,50 +12,39 @@ import shutil
 from pyfr.ctypesutil import get_libc_function
 
 
-class memoize(object):
-    def __init__(self, func):
-        self.func = func
-
-    def __get__(self, instance, owner):
-        return self.func if instance is None else ft.partial(self, instance)
-
-    def __call__(self, *args, **kwargs):
-        instance = args[0]
-
+def memoize(meth):
+    @ft.wraps(meth)
+    def newmeth(self, *args, **kwargs):
         try:
-            cache = instance._memoize_cache
+            cache = self._memoize_cache_
         except AttributeError:
-            cache = instance._memoize_cache = {}
+            cache = self._memoize_cache_ = {}
 
-        key = (self.func, pickle.dumps(args[1:]), pickle.dumps(kwargs))
+        if kwargs:
+            key = (meth, args, tuple(kwargs.items()))
+        else:
+            key = (meth, args)
 
         try:
-            res = cache[key]
+            return cache[key]
         except KeyError:
-            res = cache[key] = self.func(*args, **kwargs)
+            pass
+        except TypeError:
+            key = (meth, pickle.dumps((args, kwargs)))
 
+            try:
+                return cache[key]
+            except KeyError:
+                pass
+
+        res = cache[key] = meth(self, *args, **kwargs)
         return res
 
-
-class proxylist(list):
-    def __getattr__(self, attr):
-        return proxylist(getattr(x, attr) for x in self)
-
-    def __setattr__(self, attr, val):
-        for x in self:
-            setattr(x, attr, val)
-
-    def __delattr__(self, attr):
-        for x in self:
-            delattr(x, attr)
-
-    def __call__(self, *args, **kwargs):
-        return proxylist(x(*args, **kwargs) for x in self)
-
+    return newmeth
 
 class silence(object):
     def __init__(self, stdout=os.devnull, stderr=os.devnull):
-        self.outfiles = stdout, stderr
+        self.outfiles = (stdout, stderr)
         self.combine = (stdout == stderr)
 
         # Acquire a handle to fflush from libc
@@ -131,20 +120,6 @@ def chdir(dirname):
         os.chdir(cdir)
 
 
-class lazyprop(object):
-    def __init__(self, fn):
-        self.fn = fn
-
-    def __get__(self, instance, owner):
-        if instance is None:
-            return None
-
-        value = self.fn(instance)
-        setattr(instance, self.fn.__name__, value)
-
-        return value
-
-
 def subclasses(cls, just_leaf=False):
     sc = cls.__subclasses__()
     ssc = [g for s in sc for g in subclasses(s, just_leaf)]
@@ -160,9 +135,8 @@ def subclass_where(cls, **kwargs):
         else:
             return s
 
-    attrs = ', '.join('{0} = {1}'.format(k, v) for k, v in kwargs.items())
-    raise KeyError('No subclasses of {0} with attrs == ({1})'
-                   .format(cls.__name__, attrs))
+    attrs = ', '.join(f'{k} = {v}' for k, v in kwargs.items())
+    raise KeyError(f'No subclasses of {cls.__name__} with attrs == ({attrs})')
 
 
 def ndrange(*args):
@@ -186,10 +160,10 @@ def mv(src, dst):
 
 def match_paired_paren(delim, n=5):
     open, close = delim
-    ocset = '[^{1}{0}]'.format(open, close)
+    ocset = f'[^{close}{open}]'
 
-    lft = r'{0}*?(?:\{1}'.format(ocset, open)
-    mid = r'{0}*?'.format(ocset)
-    rgt = r'\{1}{0}*?)*?'.format(ocset, close)
+    lft = rf'{ocset}*?(?:\{open}'
+    mid = rf'{ocset}*?'
+    rgt = rf'\{close}{ocset}*?)*?'
 
     return lft*n + mid + rgt*n

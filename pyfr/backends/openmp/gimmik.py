@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 
+from ctypes import cast, c_void_p
+
 from gimmik import generate_mm
 import numpy as np
 
-from pyfr.backends.base import ComputeKernel, NotSuitableError
+from pyfr.backends.base import Kernel, NotSuitableError
 from pyfr.backends.openmp.provider import OpenMPKernelProvider
 
 
@@ -27,14 +29,24 @@ class OpenMPGiMMiKKernels(OpenMPKernelProvider):
         if np.count_nonzero(a.get()) > self.max_nnz:
             raise NotSuitableError('Matrix too dense for GiMMiK')
 
-        # Generate the GiMMiK kernel
-        src = generate_mm(a.get(), dtype=a.dtype, platform='c-omp',
+        # Generate and compile the GiMMiK function
+        src = generate_mm(a.get(), dtype=a.dtype, platform='c',
                           alpha=alpha, beta=beta)
-        gimmik_mm = self._build_kernel('gimmik_mm', src,
-                                       [np.int32] + [np.intp, np.int32]*2)
+        gimmik_mm = self._build_function('gimmik_mm', src, 'iPiPi')
+        gimmik_ptr = cast(gimmik_mm, c_void_p).value
 
-        class MulKernel(ComputeKernel):
+        # Render our parallel wrapper kernel
+        src = self.backend.lookup.get_template('batch-gemm').render(
+            lib='gimmik'
+        )
+
+        # Build
+        batch_gemm = self._build_kernel('batch_gemm', src, 'PiiPiPi')
+        batch_gemm.set_args(gimmik_ptr, b.leaddim, b.nblocks, b, b.blocksz,
+                            out, out.blocksz)
+
+        class MulKernel(Kernel):
             def run(self, queue):
-                gimmik_mm(b.ncol, b, b.leaddim, out, out.leaddim)
+                batch_gemm()
 
-        return MulKernel()
+        return MulKernel(mats=[b, out], misc=[gimmik_mm])

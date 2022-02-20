@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
-from collections import Iterable
+from collections.abc import Iterable
 import itertools as it
 import re
 
 from mako.runtime import supports_caller, capture
+import numpy as np
 
 import pyfr.nputil as nputil
 import pyfr.util as util
@@ -41,6 +42,16 @@ def array(context, ex_, **kwargs):
     return '{ ' + ', '.join(ex_.format(**{ix: i}) for i in range(*ni)) + ' }'
 
 
+def polyfit(context, f, a, b, n, var, nqpts=500):
+    x = np.linspace(a, b, nqpts)
+    y = f(x)
+
+    coeffs = np.polynomial.polynomial.polyfit(x, y, n)
+    pfexpr = f' + {var}*('.join(str(c) for c in coeffs) + ')'*n
+
+    return f'({pfexpr})'
+
+
 def _strip_parens(s):
     out, depth = [], 0
 
@@ -66,15 +77,18 @@ def _locals(body):
     # A statement can define multiple variables, so split by ','
     decls = it.chain.from_iterable(d.split(',') for d in decls)
 
-    return [re.match(r'\s*(\w+)', v).group(1) for v in decls]
+    # Extract the variable names
+    lvars = [re.match(r'\s*(\w+)', v).group(1) for v in decls]
+
+    # Prune invalid names
+    return [lv for lv in lvars if lv != 'if']
 
 
 @supports_caller
 def macro(context, name, params, externs=''):
     # Check we have not already been defined
     if name in context['_macros']:
-        raise RuntimeError('Attempt to redefine macro "{0}"'
-                           .format(name))
+        raise RuntimeError(f'Attempt to redefine macro "{name}"')
 
     # Split up the parameter and external variable list
     params = [p.strip() for p in params.split(',')]
@@ -108,14 +122,14 @@ def expand(context, name, *params):
     # Ensure all (used) external parameters have been passed to the kernel
     for extrn in mexterns:
         if (extrn not in context['_extrns'] and
-            re.search(r'\b{0}\b'.format(extrn), body)):
-            raise ValueError('Missing external {1} in {0}'.format(name, extrn))
+            re.search(rf'\b{extrn}\b', body)):
+            raise ValueError(f'Missing external {extrn} in {name}')
 
     # Rename local parameters
     for name, subst in zip(mparams, params):
-        body = re.sub(r'\b{0}\b'.format(name), subst, body)
+        body = re.sub(rf'\b{name}\b', subst, body)
 
-    return '{\n' + body + '\n}'
+    return f'{{\n{body}\n}}'
 
 
 @supports_caller

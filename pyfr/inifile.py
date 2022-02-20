@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from ast import literal_eval
-from collections import OrderedDict
-from configparser import SafeConfigParser, NoSectionError, NoOptionError
+from configparser import ConfigParser, NoSectionError, NoOptionError
 import io
 import os
 import re
@@ -18,7 +17,7 @@ _sentinel = object()
 
 class Inifile(object):
     def __init__(self, inistr=None):
-        self._cp = cp = SafeConfigParser(inline_comment_prefixes=[';'])
+        self._cp = cp = ConfigParser(inline_comment_prefixes=[';'])
 
         # Preserve case
         cp.optionxform = str
@@ -85,12 +84,12 @@ class Inifile(object):
             expr = re.sub(r'\b({0})\b'.format('|'.join(subs)),
                           lambda m: subs[m.group(1)], expr)
 
-        # Convert integers to floats
-        expr = re.sub(r'\b((\d+\.?\d*)|(\.\d+))([eE][+-]?\d+)?(?!\s*])',
+        # Convert integers not inside [] to floats
+        expr = re.sub(r'\b((\d+\.?\d*)|(\.\d+))([eE][+-]?\d+)?(?![^[]*\])',
                       _ensure_float, expr)
 
         # Encase in parenthesis
-        return '({0})'.format(expr)
+        return f'({expr})'
 
     _bool_states = {'1': True, 'yes': True, 'true': True, 'on': True,
                     '0': False, 'no': False, 'false': False, 'off': False}
@@ -109,18 +108,18 @@ class Inifile(object):
         return literal_eval(self.get(section, option, default))
 
     def items(self, section):
-        return OrderedDict(self._cp.items(section))
+        return dict(self._cp.items(section))
 
     def items_as(self, section, type):
-        iv = []
+        iv = {}
 
         for k, v in self._cp.items(section):
             try:
-                iv.append((k, type(v)))
+                iv[k] = type(v)
             except ValueError:
                 pass
 
-        return OrderedDict(iv)
+        return iv
 
     def sections(self):
         return self._cp.sections()

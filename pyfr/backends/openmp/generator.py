@@ -5,86 +5,123 @@ from pyfr.backends.base.generator import BaseKernelGenerator
 
 class OpenMPKernelGenerator(BaseKernelGenerator):
     def render(self):
+        kargdefn, kargassn = self._render_args('args')
+
         if self.ndim == 1:
-            inner = '''
-                    int cb, ce;
-                    loop_sched_1d(_nx, align, &cb, &ce);
-                    int nci = ((ce - cb) / SOA_SZ)*SOA_SZ;
-                    for (int _xi = cb; _xi < cb + nci; _xi += SOA_SZ)
+            core = f'''
+                   for (int _xi = 0; _xi < BLK_SZ; _xi += SOA_SZ)
+                   {{
+                       #pragma omp simd
+                       for (int _xj = 0; _xj < SOA_SZ; _xj++)
+                       {{
+                           {self.body}
+                       }}
+                   }}'''
+            clean = f'''
+                    for (int _xi = 0; _xi < _remi; _xi += SOA_SZ)
                     {{
                         #pragma omp simd
                         for (int _xj = 0; _xj < SOA_SZ; _xj++)
                         {{
-                            {body}
+                            {self.body}
                         }}
                     }}
-                    for (int _xi = cb + nci, _xj = 0; _xj < ce - _xi; _xj++)
+                    for (int _xi = _remi, _xj = 0; _xj < _remj; _xj++)
                     {{
-                        {body}
-                    }}'''.format(body=self.body)
+                        {self.body}
+                    }}'''
         else:
-            inner = '''
-                    int rb, re, cb, ce;
-                    loop_sched_2d(_ny, _nx, align, &rb, &re, &cb, &ce);
-                    int nci = ((ce - cb) / SOA_SZ)*SOA_SZ;
-                    for (int _y = rb; _y < re; _y++)
+            core = f'''
+                   for (int _y = 0; _y < _ny; _y++)
+                   {{
+                       for (int _xi = 0; _xi < BLK_SZ; _xi += SOA_SZ)
+                       {{
+                           #pragma omp simd
+                           for (int _xj = 0; _xj < SOA_SZ; _xj++)
+                           {{
+                               {self.body}
+                           }}
+                       }}
+                   }}'''
+            clean = f'''
+                    for (int _y = 0; _y < _ny; _y++)
                     {{
-                        for (int _xi = cb; _xi < cb + nci; _xi += SOA_SZ)
+                        for (int _xi = 0; _xi < _remi; _xi += SOA_SZ)
                         {{
                             #pragma omp simd
                             for (int _xj = 0; _xj < SOA_SZ; _xj++)
                             {{
-                                {body}
+                                {self.body}
                             }}
                         }}
-                        for (int _xi = cb + nci, _xj = 0; _xj < ce - _xi;
-                             _xj++)
+                    }}
+                    for (int _y = 0; _y < _ny; _y++)
+                    {{
+                        for (int _xi = _remi, _xj = 0; _xj < _remj; _xj++)
                         {{
-                            {body}
+                            {self.body}
                         }}
-                    }}'''.format(body=self.body)
+                    }}'''
 
-        return '''{spec}
+        return f'''
+               struct kargs {{ {kargdefn}; }};
+               void {self.name}(const struct kargs *restrict args)
                {{
+                   {kargassn};
+                   int nci = _nx / BLK_SZ;
+                   int _remi = ((_nx % BLK_SZ) / SOA_SZ)*SOA_SZ;
+                   int _remj = (_nx % BLK_SZ) % SOA_SZ;
                    #define X_IDX (_xi + _xj)
                    #define X_IDX_AOSOA(v, nv)\
                        ((_xi/SOA_SZ*(nv) + (v))*SOA_SZ + _xj)
-                   int align = PYFR_ALIGN_BYTES / sizeof(fpdtype_t);
-                   #pragma omp parallel
+                   #define BLK_IDX ib*BLK_SZ
+                   #define BCAST_BLK(i, ld)\
+                       ((i) % (ld) + ((i) / (ld))*(ld)*_ny)
+                   #pragma omp parallel for
+                   for (int ib = 0; ib < nci; ib++)
                    {{
-                       {inner}
+                       {core}
                    }}
+                   int ib = nci;
+                   {clean}
                    #undef X_IDX
                    #undef X_IDX_AOSOA
-               }}'''.format(spec=self._render_spec(), inner=inner)
+                   #undef BLK_IDX
+                   #undef BCAST_BLK
+               }}'''
 
-    def _render_spec(self):
+    def ldim_size(self, name, *factor):
+        return '*'.join(['BLK_SZ'] + [str(f) for f in factor])
+
+    def needs_ldim(self, arg):
+        return False
+
+    def _render_args(self, argn):
         # We first need the argument list; starting with the dimensions
-        kargs = ['int ' + d for d in self._dims]
+        kargs = [('int ', d) for d in self._dims]
 
         # Now add any scalar arguments
-        kargs.extend('{0.dtype} {0.name}'.format(sa) for sa in self.scalargs)
+        kargs.extend((sa.dtype, sa.name) for sa in self.scalargs)
 
         # Finally, add the vector arguments
         for va in self.vectargs:
             # Views
             if va.isview:
-                kargs.append('{0.dtype}* __restrict__ {0.name}_v'.format(va))
-                kargs.append('const int* __restrict__ {0.name}_vix'
-                             .format(va))
+                kargs.append((f'{va.dtype}*', f'{va.name}_v'))
+                kargs.append(('const int*', f'{va.name}_vix'))
 
                 if va.ncdim == 2:
-                    kargs.append('const int* __restrict__ {0.name}_vrstri'
-                                 .format(va))
+                    kargs.append(('const int*', f'{va.name}_vrstri'))
             # Arrays
             else:
                 # Intent in arguments should be marked constant
-                const = 'const' if va.intent == 'in' else ''
+                if va.intent == 'in':
+                    kargs.append((f'const {va.dtype}*', f'{va.name}_v'))
+                else:
+                    kargs.append((f'{va.dtype}*', f'{va.name}_v'))
 
-                kargs.append('{0} {1.dtype}* __restrict__ {1.name}_v'
-                             .format(const, va).strip())
+        # Argument definition and assignment operations
+        kargdefn = ';\n'.join(f'{t} {n}' for t, n in kargs)
+        kargassn = ';\n'.join(f'{t} {n} = {argn}->{n}' for t, n in kargs)
 
-                if self.needs_ldim(va):
-                    kargs.append('int ld{0.name}'.format(va))
-
-        return 'void {0}({1})'.format(self.name, ', '.join(kargs))
+        return kargdefn, kargassn

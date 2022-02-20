@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import itertools as it
+import re
 import types
 
-from pyfr.util import memoize, proxylist
+from pyfr.util import memoize
 
 
-class _BaseKernel(object):
-    def __call__(self, *args, **kwargs):
-        return self, args, kwargs
+class Kernel(object):
+    def __init__(self, mats=[], views=[], misc=[]):
+        self.mats = mats
+        self.views = views
+        self.misc = misc
 
     @property
     def retval(self):
@@ -18,36 +21,17 @@ class _BaseKernel(object):
         pass
 
 
-class ComputeKernel(_BaseKernel):
-    ktype = 'compute'
-
-
-class MPIKernel(_BaseKernel):
-    ktype = 'mpi'
-
-
-class NullComputeKernel(ComputeKernel):
+class NullKernel(Kernel):
     pass
 
 
-class NullMPIKernel(MPIKernel):
-    pass
-
-
-class _MetaKernel(object):
+class MetaKernel(Kernel):
     def __init__(self, kernels):
-        self._kernels = proxylist(kernels)
+        self._kernels = list(kernels)
 
     def run(self, queue, *args, **kwargs):
-        self._kernels.run(queue, *args, **kwargs)
-
-
-class ComputeMetaKernel(_MetaKernel, ComputeKernel):
-    pass
-
-
-class MPIMetaKernel(_MetaKernel, MPIKernel):
-    pass
+        for k in self._kernels:
+            k.run(queue, *args, **kwargs)
 
 
 class BaseKernelProvider(object):
@@ -78,11 +62,11 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
         # Render the template to yield the source code
         tpl = self.backend.lookup.get_template(mod)
         src = tpl.render(**tplargs)
+        src = re.sub(r'\n\n+', r'\n\n', src)
 
         # Check the kernel exists in the template
         if name not in argspecs:
-            raise ValueError('Kernel "{0}" not defined in template'
-                             .format(name))
+            raise ValueError(f'Kernel "{name}" not defined in template')
 
         # Extract the metadata for the kernel
         ndim, argn, argt = argspecs[name]
@@ -96,12 +80,14 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
         # Possible matrix types
         mattypes = (
             self.backend.const_matrix_cls, self.backend.matrix_cls,
-            self.backend.matrix_bank_cls, self.backend.matrix_slice_cls,
-            self.backend.xchg_matrix_cls
+            self.backend.xchg_matrix_cls, self.backend.matrix_slice_cls
         )
 
         # Possible view types
         viewtypes = (self.backend.view_cls, self.backend.xchg_view_cls)
+
+        # Backend matrices and views this kernel operates on
+        argmats, argviews = [], []
 
         # First arguments are the iteration dimensions
         ndim, arglst = len(dims), [int(d) for d in dims]
@@ -119,9 +105,17 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
 
             # Matrix
             if isinstance(ka, mattypes):
-                arglst += [ka, ka.leaddim] if len(atypes) == 2 else [ka]
+                argmats.append(ka)
+
+                # Check that argument is not a row sliced matrix
+                if isinstance(ka, mattypes[-1]) and ka.nrow != ka.parent.nrow:
+                    raise ValueError('Row sliced matrices are not supported')
+                else:
+                    arglst += [ka, ka.leaddim] if len(atypes) == 2 else [ka]
             # View
             elif isinstance(ka, viewtypes):
+                argviews.append(ka)
+
                 if isinstance(ka, self.backend.view_cls):
                     view = ka
                 else:
@@ -133,9 +127,9 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
             else:
                 arglst.append(ka)
 
-        return arglst
+        return arglst, (argmats, argviews)
 
-    def _instantiate_kernel(self, dims, fun, arglst):
+    def _instantiate_kernel(self, dims, fun, arglst, argmv):
         pass
 
     def register(self, mod):
@@ -146,8 +140,8 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
         if hasattr(self, name):
             # Same name different module
             if getattr(self, name)._mod != mod:
-                raise RuntimeError('Attempt to re-register "{0}" with a '
-                                   'different module'.format(name))
+                raise RuntimeError(f'Attempt to re-register "{name}" with a '
+                                   'different module')
             # Otherwise (since we're already registered) return
             else:
                 return
@@ -162,10 +156,10 @@ class BasePointwiseKernelProvider(BaseKernelProvider):
             fun = self._build_kernel(name, src, list(it.chain(*argt)))
 
             # Process the argument list
-            argb = self._build_arglst(dims, argn, argt, kwargs)
+            argb, argmv = self._build_arglst(dims, argn, argt, kwargs)
 
-            # Return a ComputeKernel subclass instance
-            return self._instantiate_kernel(dims, fun, argb)
+            # Return a Kernel subclass instance
+            return self._instantiate_kernel(dims, fun, argb, argmv)
 
         # Attach the module to the method as an attribute
         kernel_meth._mod = mod

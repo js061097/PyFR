@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 
+from functools import cached_property
 import math
 import re
 
 import numpy as np
 
 from pyfr.nputil import npeval, fuzzysort
-from pyfr.util import lazyprop, memoize
+from pyfr.util import memoize
 
 
 class BaseElements(object):
@@ -40,7 +41,7 @@ class BaseElements(object):
         self.antialias = basis.antialias
 
         # If we need quadrature points or not
-        haveqpts = 'flux' in self.antialias or 'div-flux' in self.antialias
+        haveqpts = 'flux' in self.antialias
 
         # Sizes
         self.nupts = basis.nupts
@@ -64,18 +65,18 @@ class BaseElements(object):
 
         # Get the physical location of each solution point
         coords = self.ploc_at_np('upts').swapaxes(0, 1)
-        vars.update(dict(zip('xyz', coords)))
+        vars |= dict(zip('xyz', coords))
 
         # Evaluate the ICs from the config file
         ics = [npeval(self.cfg.getexpr('soln-ics', dv), vars)
                for dv in self.privarmap[self.ndims]]
 
         # Allocate
-        self._scal_upts = np.empty((self.nupts, self.nvars, self.neles))
+        self.scal_upts = np.empty((self.nupts, self.nvars, self.neles))
 
         # Convert from primitive to conservative form
         for i, v in enumerate(self.pri_to_con(ics, self.cfg)):
-            self._scal_upts[:, i, :] = v
+            self.scal_upts[:, i, :] = v
 
     def set_ics_from_soln(self, solnmat, solncfg):
         # Recreate the existing solution basis
@@ -88,10 +89,10 @@ class BaseElements(object):
         nupts, neles, nvars = self.nupts, self.neles, self.nvars
 
         # Apply and reshape
-        self._scal_upts = interp @ solnmat.reshape(solnb.nupts, -1)
-        self._scal_upts = self._scal_upts.reshape(nupts, nvars, neles)
+        self.scal_upts = interp @ solnmat.reshape(solnb.nupts, -1)
+        self.scal_upts = self.scal_upts.reshape(nupts, nvars, neles)
 
-    @lazyprop
+    @cached_property
     def plocfpts(self):
         # Construct the physical location operator matrix
         plocop = self.basis.sbasis.nodal_basis_at(self.basis.fpts)
@@ -102,7 +103,7 @@ class BaseElements(object):
 
         return plocfpts
 
-    @lazyprop
+    @cached_property
     def _srtd_face_fpts(self):
         plocfpts = self.plocfpts.transpose(1, 2, 0)
 
@@ -113,57 +114,66 @@ class BaseElements(object):
         pass
 
     @property
-    def _ext_int_sides(self):
-        # No elements on a partition boundary
-        if self._intoff == 0:
-            return [('int', self.neles)]
-        # All elements on a partition boundary
-        elif self._intoff >= self.neles:
-            return [('ext', self.neles)]
-        # Mix of elements
-        else:
-            return [('ext', self._intoff), ('int', self.neles - self._intoff)]
+    def _mesh_regions(self):
+        off = self._linoff
 
-    def _slice_mat(self, mat, side, ra=None, rb=None):
-        ix = self._intoff
+        # No curved elements
+        if off == 0:
+            return {'linear': self.neles}
+        # All curved elements
+        elif off >= self.neles:
+            return {'curved': self.neles}
+        # Mix of curved and linear elements
+        else:
+            return {'curved': off, 'linear': self.neles - off}
+
+    def _slice_mat(self, mat, region, ra=None, rb=None):
+        if mat is None:
+            return None
+
+        off = self._linoff
 
         # Handle stacked matrices
         if len(mat.ioshape) >= 3:
-            ix *= mat.ioshape[-2]
+            off *= mat.ioshape[-2]
         else:
-            ix = min(ix, mat.ncol)
+            off = min(off, mat.ncol)
 
-        if side == 'ext':
-            return mat.slice(ra, rb, 0, ix)
-        elif side == 'int':
-            return mat.slice(ra, rb, ix, mat.ncol)
+        if region == 'curved':
+            return mat.slice(ra, rb, 0, off)
+        elif region == 'linear':
+            return mat.slice(ra, rb, off, mat.ncol)
         else:
-            raise ValueError('Invalid slice side')
+            raise ValueError('Invalid slice region')
 
-    @lazyprop
+    @cached_property
     def _src_exprs(self):
         convars = self.convarmap[self.ndims]
 
         # Variable and function substitutions
         subs = self.cfg.items('constants')
-        subs.update(x='ploc[0]', y='ploc[1]', z='ploc[2]')
-        subs.update({v: 'u[{0}]'.format(i) for i, v in enumerate(convars)})
-        subs.update(abs='fabs', pi=str(math.pi))
+        subs |= dict(x='ploc[0]', y='ploc[1]', z='ploc[2]')
+        subs |= dict(abs='fabs', pi=str(math.pi))
+        subs |= {v: f'u[{i}]' for i, v in enumerate(convars)}
 
         return [self.cfg.getexpr('solver-source-terms', v, '0', subs=subs)
                 for v in convars]
 
-    @lazyprop
+    @cached_property
     def _ploc_in_src_exprs(self):
         return any(re.search(r'\bploc\b', ex) for ex in self._src_exprs)
 
-    @lazyprop
+    @cached_property
     def _soln_in_src_exprs(self):
         return any(re.search(r'\bu\b', ex) for ex in self._src_exprs)
 
-    def set_backend(self, backend, nscalupts, nonce, intoff):
+    def set_backend(self, backend, nscalupts, nonce, linoff):
         self._be = backend
-        self._intoff = intoff - intoff % -backend.soasz
+
+        if self.basis.order >= 2:
+            self._linoff = linoff - linoff % -backend.csubsz
+        else:
+            self._linoff = self.neles
 
         # Sizes
         ndims, nvars, neles = self.ndims, self.nvars, self.neles
@@ -178,20 +188,14 @@ class BaseElements(object):
         valloc = lambda ex, n: alloc(ex, (ndims, n, nvars, neles))
 
         # Allocate required scalar scratch space
-        if 'scal_fpts' in sbufs and 'scal_qpts' in sbufs:
-            self._scal_fqpts = salloc('_scal_fqpts', nfpts + nqpts)
-            self._scal_fpts = self._scal_fqpts.slice(0, nfpts)
-            self._scal_qpts = self._scal_fqpts.slice(nfpts, nfpts + nqpts)
-        elif 'scal_fpts' in sbufs:
+        if 'scal_fpts' in sbufs:
             self._scal_fpts = salloc('scal_fpts', nfpts)
-        elif 'scal_qpts' in sbufs:
+        if 'scal_qpts' in sbufs:
             self._scal_qpts = salloc('scal_qpts', nqpts)
 
         # Allocate additional scalar scratch space
         if 'scal_upts_cpy' in sbufs:
             self._scal_upts_cpy = salloc('scal_upts_cpy', nupts)
-        elif 'scal_qpts_cpy' in sbufs:
-            self._scal_qpts_cpy = salloc('scal_qpts_cpy', nqpts)
 
         # Allocate required vector scratch space
         if 'vect_upts' in sbufs:
@@ -201,18 +205,18 @@ class BaseElements(object):
         if 'vect_fpts' in sbufs:
             self._vect_fpts = valloc('vect_fpts', nfpts)
 
-        # Allocate and bank the storage required by the time integrator
-        self._scal_upts = [backend.matrix(self._scal_upts.shape,
-                                          self._scal_upts, tags={'align'})
+        # Allocate the storage required by the time integrator
+        self.scal_upts = [backend.matrix(self.scal_upts.shape,
+                                         self.scal_upts, tags={'align'})
                            for i in range(nscalupts)]
-        self.scal_upts_inb = inb = backend.matrix_bank(self._scal_upts)
-        self.scal_upts_outb = backend.matrix_bank(self._scal_upts)
 
-        # Find/allocate space for a solution-sized scalar that is
-        # allowed to alias other scratch space in the simulation
-        aliases = next((m for m in abufs if m.nbytes >= inb.nbytes), None)
-        self._scal_upts_temp = backend.matrix(inb.ioshape, aliases=aliases,
-                                              tags=inb.tags)
+        # Find/allocate space for a solution-sized scalar
+        tags = self.scal_upts[0].tags
+        nbytes = self.scal_upts[0].nbytes
+        ioshape = self.scal_upts[0].ioshape
+        aliases = next((m for m in abufs if m.nbytes >= nbytes), None)
+        self._scal_upts_temp = backend.matrix(ioshape, aliases=aliases,
+                                              tags=tags)
 
     @memoize
     def opmat(self, expr):
@@ -252,7 +256,8 @@ class BaseElements(object):
         _, djacs_mpts = self._smats_djacs_mpts
 
         # Interpolation matrix to pts
-        m0 = self.basis.mbasis.nodal_basis_at(getattr(self.basis, name))
+        pt = getattr(self.basis, name) if isinstance(name, str) else name
+        m0 = self.basis.mbasis.nodal_basis_at(pt)
 
         # Interpolate the djacs
         djac = m0 @ djacs_mpts
@@ -269,7 +274,8 @@ class BaseElements(object):
 
     @memoize
     def ploc_at_np(self, name):
-        op = self.basis.sbasis.nodal_basis_at(getattr(self.basis, name))
+        pt = getattr(self.basis, name) if isinstance(name, str) else name
+        op = self.basis.sbasis.nodal_basis_at(pt)
 
         ploc = op @ self.eles.reshape(self.nspts, -1)
         ploc = ploc.reshape(-1, self.neles, self.ndims).swapaxes(1, 2)
@@ -280,6 +286,14 @@ class BaseElements(object):
     @memoize
     def ploc_at(self, name):
         return self._be.const_matrix(self.ploc_at_np(name), tags={'align'})
+
+    @cached_property
+    def upts(self):
+        return self._be.const_matrix(self.basis.upts)
+
+    @cached_property
+    def qpts(self):
+        return self._be.const_matrix(self.basis.qpts)
 
     def _gen_pnorm_fpts(self):
         smats = self.smat_at_np('fpts').transpose(1, 3, 0, 2)
@@ -301,17 +315,17 @@ class BaseElements(object):
         self._norm_pnorm_fpts = pnorm_fpts / mag_pnorm_fpts[..., None]
         self._mag_pnorm_fpts = mag_pnorm_fpts
 
-    @lazyprop
+    @cached_property
     def _norm_pnorm_fpts(self):
         self._gen_pnorm_fpts()
         return self._norm_pnorm_fpts
 
-    @lazyprop
+    @cached_property
     def _mag_pnorm_fpts(self):
         self._gen_pnorm_fpts()
         return self._mag_pnorm_fpts
 
-    @lazyprop
+    @cached_property
     def _smats_djacs_mpts(self):
         # Metric basis with grid point (q<=p) or pseudo grid points (q>p)
         mpts = self.basis.mpts
@@ -362,8 +376,12 @@ class BaseElements(object):
             smats[1] = 0.5*(dtt[0][2] - dtt[2][0])
             smats[2] = 0.5*(dtt[1][0] - dtt[0][1])
 
-            # Exploit the fact that det(J) = x0 . (x1 ^ x2)
-            djacs = np.einsum('ij...,ji...->j...', jac[0], smats[0])
+            # We note that J = [x0; x1; x2]
+            x0, x1, x2 = jac
+
+            # Exploit the fact that det(J) = x0 · (x1 ^ x2)
+            x1cx2 = np.cross(x1, x2, axisa=0, axisb=0, axisc=1)
+            djacs = np.einsum('ij...,ji...->j...', x0, x1cx2)
 
         return smats.reshape(ndims, nmpts, -1), djacs
 

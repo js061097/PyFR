@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 
 import numpy as np
-import pyopencl as cl
-from pyopencl.array import Array
-from pyopencl.reduction import ReductionKernel
 
 from pyfr.backends.opencl.provider import OpenCLKernelProvider
-from pyfr.backends.base import ComputeKernel
-from pyfr.nputil import npdtype_to_ctype
+from pyfr.backends.base import Kernel
 
 
 class OpenCLBlasExtKernels(OpenCLKernelProvider):
@@ -16,7 +12,7 @@ class OpenCLBlasExtKernels(OpenCLKernelProvider):
             raise ValueError('Incompatible matrix types')
 
         nv = len(arr)
-        nrow, ncol, ldim, dtype = arr[0].traits
+        nrow, ncol, ldim, dtype = arr[0].traits[1:]
         ncola, ncolb = arr[0].ioshape[1:]
 
         # Render the kernel template
@@ -27,65 +23,82 @@ class OpenCLBlasExtKernels(OpenCLKernelProvider):
         # Build the kernel
         kern = self._build_kernel('axnpby', src,
                                   [np.int32]*3 + [np.intp]*nv + [dtype]*nv)
+        kern.set_args(nrow, ncolb, ldim, *arr)
 
-        class AxnpbyKernel(ComputeKernel):
+        class AxnpbyKernel(Kernel):
             def run(self, queue, *consts):
-                args = [x.data for x in arr] + list(consts)
-                kern(queue.cl_queue_comp, (ncolb, nrow), None, nrow, ncolb,
-                     ldim, *args)
+                kern.set_args(*consts, start=3 + nv)
+                kern.exec_async(queue.cmd_q, (ncolb, nrow), None)
 
-        return AxnpbyKernel()
+        return AxnpbyKernel(mats=arr)
 
     def copy(self, dst, src):
+        cl = self.backend.cl
+
         if dst.traits != src.traits:
             raise ValueError('Incompatible matrix types')
 
-        class CopyKernel(ComputeKernel):
+        class CopyKernel(Kernel):
             def run(self, queue):
-                cl.enqueue_copy(queue.cl_queue_comp, dst.data, src.data)
+                cl.memcpy_async(queue.cmd_q, dst, src, dst.nbytes)
 
         return CopyKernel()
 
-    def errest(self, x, y, z, *, norm):
-        if x.traits != y.traits != z.traits:
+    def reduction(self, *rs, method, norm, dt_mat=None):
+        if any(r.traits != rs[0].traits for r in rs[1:]):
             raise ValueError('Incompatible matrix types')
 
-        nrow, ncol, ldim, dtype = x.traits
-        ncola, ncolb = x.ioshape[1:]
+        cl = self.backend.cl
+        nrow, ncol, ldim, dtype = rs[0].traits[1:]
+        ncola, ncolb = rs[0].ioshape[1:]
 
         # Reduction workgroup dimensions
-        ls = (128,)
-        gs = (ncolb - ncolb % -ls[0],)
+        ls = (128, 1)
+        gs = (ncolb - ncolb % -ls[0], ncola)
 
         # Empty result buffer on host with (nvars, ngroups)
-        err_host = np.empty((ncola, gs[0] // ls[0]), dtype)
+        reduced_host = np.empty((ncola, gs[0] // ls[0]), dtype)
 
-        # Device memory allocation
-        err_dev = cl.Buffer(self.backend.ctx, cl.mem_flags.READ_WRITE,
-                            err_host.nbytes)
+        # Corresponding device memory allocation
+        reduced_dev = cl.mem_alloc(reduced_host.nbytes)
+
+        tplargs = dict(norm=norm, sharesz=ls[0], method=method)
+
+        if method == 'resid':
+            tplargs['dt_type'] = 'matrix' if dt_mat else 'scalar'
 
         # Get the kernel template
-        src = self.backend.lookup.get_template('errest').render(
-            norm=norm, ncola=ncola, sharesz=ls[0]
-        )
+        src = self.backend.lookup.get_template('reduction').render(**tplargs)
+
+        regs = list(rs) + [dt_mat] if dt_mat else rs
+
+        # Argument types for reduction kernel
+        if method == 'errest':
+            argt = [np.int32]*3 + [np.intp]*4 + [dtype]*2
+        elif method == 'resid' and dt_mat:
+            argt = [np.int32]*3 + [np.intp]*4 + [dtype]
+        else:
+            argt = [np.int32]*3 + [np.intp]*3 + [dtype]
 
         # Build the reduction kernel
-        rkern = self._build_kernel(
-              'errest', src, [np.int32]*3 + [np.intp]*4 + [dtype]*2
-        )
+        rkern = self._build_kernel('reduction', src, argt)
+        rkern.set_args(nrow, ncolb, ldim, reduced_dev, *regs)
 
         # Norm type
         reducer = np.max if norm == 'uniform' else np.sum
 
-        class ErrestKernel(ComputeKernel):
+        # Runtime argument offset
+        facoff = argt.index(dtype)
+
+        class ReductionKernel(Kernel):
             @property
             def retval(self):
-                return reducer(err_host, axis=1)
+                return reducer(reduced_host, axis=1)
 
-            def run(self, queue, atol, rtol):
-                rkern(queue.cl_queue_comp, gs, ls, nrow, ncolb, ldim, err_dev,
-                      x.data, y.data, z.data, atol, rtol)
-                cl.enqueue_copy(queue.cl_queue_comp, err_host, err_dev,
-                                is_blocking=False)
+            def run(self, queue, *facs):
+                rkern.set_args(*facs, start=facoff)
+                rkern.exec_async(queue.cmd_q, gs, ls)
+                cl.memcpy_async(queue.cmd_q, reduced_host, reduced_dev,
+                                reduced_dev.nbytes)
 
-        return ErrestKernel()
+        return ReductionKernel(mats=regs)

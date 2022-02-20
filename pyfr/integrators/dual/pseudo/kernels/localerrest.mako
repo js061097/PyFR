@@ -3,19 +3,20 @@
 <%namespace module='pyfr.backends.base.makoutil' name='pyfr'/>
 
 <%pyfr:kernel name='localerrest' ndim='2'
-              err='inout fpdtype_t[${str(nvars)}]'
+              err='in fpdtype_t[${str(nvars)}]'
               errprev='inout fpdtype_t[${str(nvars)}]'
-              dtau_upts ='inout fpdtype_t[${str(nvars)}]'>
-    fpdtype_t fac[${nvars}];
+              dtau_upts='inout fpdtype_t[${str(nvars)}]'>
+    fpdtype_t ferr, gerr, ufac, vfac;
 
 % for i in range(nvars):
-    err[${i}] = fabs(err[${i}]/${atol});
-
-    fac[${i}] = pow(err[${i}], ${-expa}) * pow(errprev[${i}], ${expb});
-    fac[${i}] = min(${maxf}, max(${minf}, ${saff}*fac[${i}]));
+    ferr = fabs(${1/atol}*err[${i}]);
+    gerr = errprev[${i}];
+    ufac = ${pyfr.polyfit(lambda x: x**-expa, 1e-6, 10, 8, 'ferr')}
+         * ${pyfr.polyfit(lambda x: x**expb, 1e-6, 10, 8, 'gerr')};
+    vfac = min(${maxf}, max(${minf}, ${saff}*ufac));
 
     // Compute the size of the next step
-    dtau_upts[${i}] = min(max(fac[${i}]*dtau_upts[${i}], ${dtau_min}), ${dtau_max});
-    errprev[${i}] = err[${i}];
+    dtau_upts[${i}] = min(max(vfac*dtau_upts[${i}], ${dtau_min}), ${dtau_max});
+    errprev[${i}] = ferr;
 % endfor
 </%pyfr:kernel>
