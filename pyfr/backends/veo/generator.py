@@ -32,6 +32,8 @@ class VeoKernelGenerator(BaseKernelGenerator):
                    #define X_IDX (_xi)
                    #define X_IDX_AOSOA(v, nv)\
                        ((_xi/SOA_SZ*(nv) + (v))*SOA_SZ + _xi % SOA_SZ)
+                   #define BLK_IDX 0
+                   #define BCAST_BLK(i, ld) i
                    int align = PYFR_ALIGN_BYTES / sizeof(fpdtype_t);
                    #pragma omp parallel
                    {{
@@ -39,6 +41,8 @@ class VeoKernelGenerator(BaseKernelGenerator):
                    }}
                    #undef X_IDX
                    #undef X_IDX_AOSOA
+                   #undef BLK_IDX
+                   #undef BCAST_BLK
                }}'''.format(spec=self._render_spec(), inner=inner)
 
     def _render_spec(self):

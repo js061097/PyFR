@@ -8,6 +8,7 @@ from pyfr.mpiutil import get_local_rank
 
 class VeoBackend(BaseBackend):
     name = 'veo'
+    blocks = False
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -21,11 +22,15 @@ class VeoBackend(BaseBackend):
         # Create a VEO process on this device
         self.proc = VeoProc(int(devid))
 
+        # Create an associated context
+        self.ctx = self.proc.open_context()
+
         # Take the default alignment requirement to be 64-bytes
         self.alignb = 64
 
         # Compute the SoA size
         self.soasz = self.alignb // np.dtype(self.fpdtype).itemsize
+        self.csubsz = self.soasz
 
         from pyfr.backends.veo import (blasext, cblas, gimmik, packing,
                                        provider, types)
@@ -34,7 +39,6 @@ class VeoBackend(BaseBackend):
         self.base_matrix_cls = types.VeoMatrixBase
         self.const_matrix_cls = types.VeoConstMatrix
         self.matrix_cls = types.VeoMatrix
-        self.matrix_bank_cls = types.VeoMatrixBank
         self.matrix_slice_cls = types.VeoMatrixSlice
         self.queue_cls = types.VeoQueue
         self.view_cls = types.VeoView

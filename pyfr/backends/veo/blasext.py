@@ -12,7 +12,7 @@ class VeoBlasExtKernels(VeoKernelProvider):
             raise ValueError('Incompatible matrix types')
 
         nv = len(arr)
-        nrow, ncol, ldim, dtype = arr[0].traits
+        nrow, ncol, ldim, dtype = arr[0].traits[1:]
         ncola, ncolb = arr[0].ioshape[1:]
 
         # Render the kernel template
@@ -51,16 +51,12 @@ class VeoBlasExtKernels(VeoKernelProvider):
 
         return CopyKernel()
 
-    def errest(self, x, y, z, *, norm):
-        if x.traits != y.traits != z.traits:
+    def reduction(self, *rs, method, norm, dt_mat=None):
+        if any(r.traits != rs[0].traits for r in rs[1:]):
             raise ValueError('Incompatible matrix types')
 
-        nrow, ncol, ldim, dtype = x.traits
-        ncola, ncolb = x.ioshape[1:]
-
-        # Render the reduction kernel template
-        src = self.backend.lookup.get_template('errest').render(norm=norm,
-                                                                ncola=ncola)
+        nrow, ncol, ldim, dtype = rs[0].traits[1:]
+        ncola, ncolb = rs[0].ioshape[1:]
 
         # Empty result buffer on host with nvars elements
         err_host = np.empty(ncola, dtype)
@@ -68,19 +64,39 @@ class VeoBlasExtKernels(VeoKernelProvider):
         # Paired device memory allocation
         err_dev = self.backend.proc.alloc_mem(err_host.nbytes)
 
-        # Build
-        rkern = self._build_kernel(
-            'errest', src, [np.int32]*3 + [np.intp]*4 + [dtype]*2
-        )
+        tplargs = dict(norm=norm, method=method)
 
-        class ErrestKernel(ComputeKernel):
+        if method == 'resid':
+            tplargs['dt_type'] = 'matrix' if dt_mat else 'scalar'
+
+        # Get the kernel template
+        src = self.backend.lookup.get_template('reduction').render(**tplargs)
+
+        regs = list(rs) + [dt_mat] if dt_mat else rs
+
+        # Argument types for reduction kernel
+        if method == 'errest':
+            argt = [np.int32]*3 + [np.intp]*4 + [dtype]*2
+        elif method == 'resid' and dt_mat:
+            argt = [np.int32]*3 + [np.intp]*4 + [dtype]
+        else:
+            argt = [np.int32]*3 + [np.intp]*3 + [dtype]
+
+        # Build the reduction kernel
+        rkern = self._build_kernel('reduction', src, argt)
+
+        # Norm type
+        reducer = np.max if norm == 'uniform' else np.sum
+
+        class ReductionKernel(Kernel):
             @property
             def retval(self):
-                return err_host
+                return reducer(reduced_host, axis=1)
 
-            def run(self, queue, atol, rtol):
-                queue.call(rkern, nrow, ncolb, ldim, err_dev, x.data, y.data,
-                           z.data, atol, rtol)
+            def run(self, queue, *facs):
+                ptrs = [r.data for r in regs]
+
+                queue.call(rkern, nrow, ncolb, ldim, reduced_dev, *ptrs, *facs)
                 queue.memcpy_dtoh(err_host, err_dev, err_host.nbytes)
 
-        return ErrestKernel()
+        return ReductionKernel()
