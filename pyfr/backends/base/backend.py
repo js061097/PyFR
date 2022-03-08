@@ -53,7 +53,7 @@ class BaseBackend(object):
     @cached_property
     def lookup(self):
         pkg = f'pyfr.backends.{self.name}.kernels'
-        dfltargs = dict(fpdtype=self.fpdtype, soasz=self.soasz,
+        dfltargs = dict(fpdtype=self.fpdtype, soasz=self.soasz, alignb=self.alignb,
                         csubsz=self.csubsz, math=math)
 
         return DottedTemplateLookup(pkg, dfltargs)

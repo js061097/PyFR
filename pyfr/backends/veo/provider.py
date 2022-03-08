@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from pyfr.backends.base import (BaseKernelProvider,
-                                BasePointwiseKernelProvider, ComputeKernel)
+                                BasePointwiseKernelProvider, Kernel)
 from pyfr.backends.veo.compiler import SourceModule
 import pyfr.backends.veo.generator as generator
 from pyfr.util import memoize
@@ -18,8 +18,8 @@ class VeoPointwiseKernelProvider(VeoKernelProvider,
                                  BasePointwiseKernelProvider):
     kernel_generator_cls = generator.VeoKernelGenerator
 
-    def _instantiate_kernel(self, dims, fun, arglst):
-        class PointwiseKernel(ComputeKernel):
+    def _instantiate_kernel(self, dims, fun, arglst, argmv):
+        class PointwiseKernel(Kernel):
             def run(self, queue, **kwargs):
                 narglst = []
                 for arg in arglst:
@@ -32,4 +32,4 @@ class VeoPointwiseKernelProvider(VeoKernelProvider,
 
                 queue.call(fun, *narglst)
 
-        return PointwiseKernel()
+        return PointwiseKernel(*argmv)

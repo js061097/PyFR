@@ -107,7 +107,7 @@ class VeoQueue(base.Queue):
             self._waitall(mpireqs)
 
         # Then, wait for the kernels to finish
-        for r in self.veo_reqs:
+        for r in self._veo_reqs:
             r.wait_result()
 
         self._veo_reqs.clear()
