@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 
-from pyfr.backends.base import ComputeKernel
-from pyfr.backends.base.packing import BasePackingKernels
+from pyfr.backends.base import Kernel, NullKernel
 from pyfr.backends.veo.provider import VeoKernelProvider
 
 
-class VeoPackingKernels(VeoKernelProvider, BasePackingKernels):
+class VeoPackingKernels(VeoKernelProvider):
     def pack(self, mv):
         # An exchange view is simply a regular view plus an exchange matrix
         m, v = mv.xchgmat, mv.view
@@ -16,7 +15,7 @@ class VeoPackingKernels(VeoKernelProvider, BasePackingKernels):
         # Build
         kern = self._build_kernel('pack_view', src, 'iiiPPPP')
 
-        class PackXchgViewKernel(ComputeKernel):
+        class PackXchgViewKernel(Kernel):
             def run(self, queue):
                 vbd = v.basedata
                 vmd = v.mapping.data
@@ -32,7 +31,7 @@ class VeoPackingKernels(VeoKernelProvider, BasePackingKernels):
         return PackXchgViewKernel()
 
     def unpack(self, mv):
-        class UnpackXchgMatrixKernel(ComputeKernel):
+        class UnpackXchgMatrixKernel(Kernel):
             def run(self, queue):
                 queue.memcpy_htod(mv.data, mv.hdata, mv.nbytes)
 

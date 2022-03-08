@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from pyfr.backends.base import ComputeKernel
+from pyfr.backends.base import Kernel
 from pyfr.backends.veo.provider import VeoKernelProvider
 
 
@@ -62,7 +62,7 @@ class VeoCBLASKernels(VeoKernelProvider):
         else:
             cblas_gemm = w.cblas_sgemm
 
-        class MulKernel(ComputeKernel):
+        class MulKernel(Kernel):
             def run(self, queue):
                 queue.call(cblas_gemm, w.ROW_MAJOR, w.NO_TRANS, w.NO_TRANS,
                            m, n, k, alpha, a.data, a.leaddim, b.data,

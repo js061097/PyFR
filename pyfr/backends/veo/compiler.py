@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from functools import cached_property
 import itertools as it
 import os
 import shlex
@@ -12,7 +13,7 @@ from pytools.prefork import call_capture_output
 
 from pyfr.ctypesutil import platform_libname
 from pyfr.nputil import npdtype_to_ctypestype
-from pyfr.util import digest, lazyprop, mv, rm
+from pyfr.util import digest, mv, rm
 
 
 class SourceModule(object):
@@ -80,7 +81,7 @@ class SourceModule(object):
         # Append any user-provided arguments and return
         return cmd + self.cflags
 
-    @lazyprop
+    @cached_property
     def cachedir(self):
         return os.environ.get('PYFR_VEO_CACHE_DIR',
                               user_cache_dir('pyfr', 'pyfr'))

@@ -3,7 +3,7 @@
 import numpy as np
 
 from pyfr.backends.veo.provider import VeoKernelProvider
-from pyfr.backends.base import ComputeKernel
+from pyfr.backends.base import Kernel
 
 
 class VeoBlasExtKernels(VeoKernelProvider):
@@ -24,7 +24,7 @@ class VeoBlasExtKernels(VeoKernelProvider):
         kern = self._build_kernel('axnpby', src,
                                   [np.int32]*3 + [np.intp]*nv + [dtype]*nv)
 
-        class AxnpbyKernel(ComputeKernel):
+        class AxnpbyKernel(Kernel):
             def run(self, queue, *consts):
                 args = [x.data for x in arr] + list(consts)
                 queue.call(kern, nrow, ncolb, ldim, *args)
@@ -45,7 +45,7 @@ class VeoBlasExtKernels(VeoKernelProvider):
         kern = self._build_kernel('par_memcpy', ksrc,
                                   [np.intp, np.intp, np.int32])
 
-        class CopyKernel(ComputeKernel):
+        class CopyKernel(Kernel):
             def run(self, queue):
                 queue.call(kern, dst.data, src.data, dst.nbytes)
 
