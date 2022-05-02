@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from functools import cached_property
+import threading
 
 import numpy as np
 
@@ -84,15 +85,47 @@ class HIPGraph(base.Graph):
         self.graph = backend.hip.create_graph()
         self.stale_kparams = {}
         self.mpi_events = []
+        self.mpi_waits = []
+        self.last_mpi_wait_gnode = None
 
     def add_mpi_req(self, req, deps=[]):
         super().add_mpi_req(req, deps)
 
         if deps:
+            kdeps = [self.knodes[d] for d in deps]
             event = self.backend.hip.create_event()
-            self.graph.add_event_record(event, [self.knodes[d] for d in deps])
+            gnode = self.graph.add_event_record(event, kdeps)
 
-            self.mpi_events.append((event, req))
+            self.mpi_events.append((event, req, gnode))
+
+    @staticmethod
+    def _host_wait_callback(event):
+        event.wait()
+        event.clear()
+
+    def _make_mpi_waitall_impl(self, reqs):
+        # See what requests need to start before we can wait
+        deps, ereqs = [], []
+        for event, req, gnode in self.mpi_events:
+            if req in reqs:
+                deps.append(gnode)
+                ereqs.append((event, req))
+
+        # Ensure we are only ever have one host-side callback in flight
+        if self.last_mpi_wait_gnode:
+            deps.append(self.last_mpi_wait_gnode)
+
+        # Add our host-side callback function to the graph
+        func, arg = self._host_wait_callback, threading.Event()
+        gnode = self.graph.add_host_func(func, arg=arg, deps=deps)
+
+        # Group the relevant events and requests together
+        self.mpi_waits.append((ereqs, reqs, arg))
+
+        handle = object()
+        self.knodes[handle] = self.last_mpi_wait_gnode = gnode
+
+        return handle
 
     def commit(self):
         super().commit()
@@ -106,19 +139,18 @@ class HIPGraph(base.Graph):
         for node, params in self.stale_kparams.items():
             self.exc_graph.set_kernel_node_params(node, params)
 
-        self.stream.synchronize()
+        stream.synchronize()
         self.exc_graph.launch(stream)
         self.stale_kparams.clear()
 
         # Start all dependency-free MPI requests
-        if self.mpi_root_reqs:
-            MPI.Prequest.Startall(self.mpi_root_reqs)
+        MPI.Prequest.Startall(self.mpi_root_reqs)
 
-        # Start any remaining requests once their dependencies are satisfied
-        for event, req in self.mpi_events:
-            event.synchronize()
-            req.Start()
+        # Process any remaining requests as their dependencies are satisfied
+        for ereqs, reqs, cvar in self.mpi_waits:
+            for event, req in ereqs:
+                event.synchronize()
+                req.Start()
 
-        # Wait for all of the MPI requests to finish
-        if self.mpi_reqs:
-            MPI.Prequest.Waitall(self.mpi_reqs)
+            MPI.Prequest.Waitall(reqs)
+            cvar.set()

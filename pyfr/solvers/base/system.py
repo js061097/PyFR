@@ -251,24 +251,20 @@ class BaseSystem:
         for b in binders:
             b(t=t)
 
-    def _rhs_graphs(self, uinbank, foutbank):
+    def _rhs_graph(self, uinbank, foutbank):
         pass
 
     def rhs(self, t, uinbank, foutbank):
         self._prepare_kernels(t, uinbank, foutbank)
+        self.backend.run_graph(self._rhs_graph(uinbank, foutbank))
 
-        for graph in self._rhs_graphs(uinbank, foutbank):
-            self.backend.run_graph(graph)
-
-    def _compute_grads_graph(self, t, uinbank):
+    def _compute_grads_graph(self, uinbank):
         raise NotImplementedError(f'Solver "{self.name}" does not compute '
                                   'corrected gradients of the solution')
 
     def compute_grads(self, t, uinbank):
         self._prepare_kernels(t, uinbank, None)
-
-        for graph in self._compute_grads_graph(uinbank):
-            self.backend.run_graph(graph)
+        self.backend.run_graph(self._compute_grads_graph(uinbank))
 
     def filt(self, uinoutbank):
         kkey = ('eles/filter_soln', uinoutbank, None)

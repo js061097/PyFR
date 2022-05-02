@@ -46,6 +46,7 @@ class OpenCLWrappers(LibWrapper):
     }
 
     # Constants
+    COMPLETE = 0x0
     BUFFER_CREATE_TYPE_REGION = 0x1220
     DEVICE_AFFINITY_DOMAIN_NEXT_PARTITIONABLE = 0x20
     DEVICE_EXTENSIONS = 0x1030
@@ -86,6 +87,8 @@ class OpenCLWrappers(LibWrapper):
         (c_int, 'clReleaseCommandQueue', c_void_p),
         (c_int, 'clFinish', c_void_p),
         (c_int, 'clFlush', c_void_p),
+        (c_void_p, 'clCreateUserEvent', c_void_p, POINTER(c_int)),
+        (c_int, 'clSetUserEventStatus', c_void_p, c_int),
         (c_int, 'clReleaseEvent', c_void_p),
         (c_int, 'clWaitForEvents', c_uint, c_void_p),
         (c_void_p, 'clCreateBuffer', c_void_p, c_uint64, c_size_t, c_void_p,
@@ -323,6 +326,14 @@ class OpenCLEvent(_OpenCLBase):
     _destroyfn = 'clReleaseEvent'
 
 
+class OpenCLUserEvent(OpenCLEvent):
+    def __init__(self, lib, ctx):
+        super().__init__(lib, lib.clCreateUserEvent(ctx))
+
+    def complete(self):
+        self.lib.clSetUserEventStatus(self, self.lib.COMPLETE)
+
+
 class OpenCLQueue(_OpenCLWaitFor, _OpenCLBase):
     _destroyfn = 'clReleaseCommandQueue'
 
@@ -509,6 +520,9 @@ class OpenCL(_OpenCLWaitFor):
 
     def event(self, evt):
         return OpenCLEvent(self.lib, evt)
+
+    def user_event(self):
+        return OpenCLUserEvent(self.lib, self.ctx)
 
     def wait_for_events(self, events):
         self.lib.clWaitForEvents(*self._make_wait_for(events))

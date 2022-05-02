@@ -294,9 +294,10 @@ class Graph:
         self.kdeps = {}
         self.depk = set()
 
-        # MPI requests along with their associated dependencies
+        # MPI requests and their dependencies (keyed as id(req))
         self.mpi_reqs = []
-        self.mpi_req_deps = []
+        self.mpi_ireq_deps = {}
+        self.mpi_ireqs_done = set()
 
     def add(self, kern, deps=[]):
         if self.committed:
@@ -323,12 +324,12 @@ class Graph:
         if self.committed:
             raise RuntimeError('Can not add nodes to a committed graph')
 
-        if req in self.mpi_reqs:
+        if id(req) in self.mpi_ireq_deps:
             raise ValueError('Can only add an MPI request to a graph once')
 
         # Add the request
         self.mpi_reqs.append(req)
-        self.mpi_req_deps.append(deps)
+        self.mpi_ireq_deps[id(req)] = deps
 
         # Note any dependencies
         self.depk.update(deps)
@@ -337,11 +338,30 @@ class Graph:
         for r in reqs:
             self.add_mpi_req(r, deps)
 
+    def make_mpi_wait_deps(self, reqs):
+        if not reqs:
+            return []
+
+        ireqs = [id(r) for r in reqs]
+
+        if not self.mpi_ireqs_done.isdisjoint(ireqs):
+            raise ValueError('Can only wait on an MPI request once')
+
+        # Mark the requests as being waited on
+        self.mpi_ireqs_done.update(ireqs)
+
+        return [self._make_mpi_waitall_impl(reqs)]
+
     def commit(self):
-        mreqs, mdeps = self.mpi_reqs, self.mpi_req_deps
+        # Check all MPI requests are claimed
+        if self.mpi_ireqs_done.difference(self.mpi_ireq_deps):
+            raise RuntimeError('Unwaited MPI requests in graph')
 
         self.committed = True
-        self.mpi_root_reqs = [r for r, d in zip(mreqs, mdeps) if not d]
+
+        # Determine what MPI requests can be started immediately
+        self.mpi_root_reqs = [r for r in self.mpi_reqs
+                              if not self.mpi_ireq_deps[id(r)]]
 
     def run(self, *args):
         pass

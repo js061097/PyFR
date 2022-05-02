@@ -62,7 +62,20 @@ class OpenMPGraph(base.Graph):
         super().__init__(backend)
 
         self.klist = []
-        self.mpi_idxs = defaultdict(list)
+        self.mpi_wdeps = {}
+        self.mpi_start_idxs = defaultdict(list)
+        self.mpi_wait_idxs = defaultdict(list)
+
+    def add(self, kern, deps=[]):
+        n = len(self.klist)
+        kdeps = [d for d in deps if d not in self.mpi_wdeps]
+
+        super().add(kern, kdeps)
+
+        for d in deps:
+            if d in self.mpi_wdeps and self.mpi_wdeps[d]:
+                self.mpi_wait_idxs[n].extend(self.mpi_wdeps[d])
+                self.mpi_wdeps[d] = None
 
     def add_mpi_req(self, req, deps=[]):
         super().add_mpi_req(req, deps)
@@ -70,27 +83,34 @@ class OpenMPGraph(base.Graph):
         if deps:
             ix = max(self.knodes[d] for d in deps)
 
-            self.mpi_idxs[ix].append(req)
+            self.mpi_start_idxs[ix].append(req)
+
+    def _make_mpi_waitall_impl(self, reqs):
+        handle = object()
+        self.mpi_wdeps[handle] = reqs
+
+        return handle
 
     def commit(self):
         super().commit()
 
         n = len(self.klist)
+        sidxs, widxs = self.mpi_start_idxs, self.mpi_wait_idxs
 
         # Obtain pointers to our kernel functions and their arguments
         self._kfunargs = (c_void_p * (2*n))()
         self._kfunargs[0::2] = [cast(k.fun, c_void_p) for k in self.klist]
         self._kfunargs[1::2] = [addressof(k.kargs) for k in self.klist]
 
-        # Group kernels in runs separated by MPI requests
+        # Group kernels in runs separated by MPI start/wait calls
         self._runlist, i = [], 0
 
-        for j in sorted(self.mpi_idxs):
-            self._runlist.append((i, j - i, self.mpi_idxs[j]))
+        for j in sorted(set([*sidxs, *widxs])):
+            self._runlist.append((i, j - i, widxs[i], sidxs[j]))
             i = j
 
         if i != n - 1:
-            self._runlist.append((i, n - i, []))
+            self._runlist.append((i, n - i, widxs[i], []))
 
     def run(self):
         from mpi4py import MPI
@@ -99,11 +119,7 @@ class OpenMPGraph(base.Graph):
         if self.mpi_root_reqs:
             MPI.Prequest.Startall(self.mpi_root_reqs)
 
-        for i, n, reqs in self._runlist:
+        for i, n, wreqs, sreqs in self._runlist:
+            MPI.Prequest.Waitall(wreqs)
             self.backend.krunner(i, n, self._kfunargs)
-
-            for req in reqs:
-                req.Start()
-
-        # Wait for all of the MPI requests to finish
-        MPI.Prequest.Waitall(self.mpi_reqs)
+            MPI.Prequest.Startall(sreqs)

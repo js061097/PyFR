@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
-from ctypes import (POINTER, Structure, addressof, c_char, c_char_p, c_int,
-                    c_size_t, c_uint, c_void_p)
+from ctypes import (CFUNCTYPE, POINTER, Structure, addressof, c_char,
+                    c_char_p, c_int, c_size_t, c_uint, c_void_p, py_object)
 
 import numpy as np
 
@@ -136,6 +136,13 @@ class HIPKernelNodeParams(Structure):
             self.set_arg(i, v)
 
 
+class HIPHostNodeParams(Structure):
+    _fields_ = [
+        ('func', CFUNCTYPE(None, py_object)),
+        ('data', py_object)
+    ]
+
+
 class HIPWrappers(LibWrapper):
     _libname = 'amdhip64'
 
@@ -192,6 +199,8 @@ class HIPWrappers(LibWrapper):
          POINTER(c_void_p), c_size_t, c_void_p),
         (c_int, 'hipGraphAddKernelNode', POINTER(c_void_p), c_void_p,
          POINTER(c_void_p), c_size_t, POINTER(HIPKernelNodeParams)),
+        (c_int, 'hipGraphAddHostNode', POINTER(c_void_p), c_void_p,
+         POINTER(c_void_p), c_size_t, POINTER(CUDAHostNodeParams)),
         (c_int, 'hipGraphAddMemcpyNode1D', POINTER(c_void_p), c_void_p,
          POINTER(c_void_p), c_size_t, c_void_p, c_void_p, c_size_t, c_int),
         (c_int, 'hipGraphInstantiate', POINTER(c_void_p), c_void_p, c_void_p,
@@ -321,6 +330,8 @@ class HIPGraph(_HIPBase):
             ptr = c_void_p()
             hip.lib.hipGraphCreate(ptr, 0)
 
+        self.host_funcs = []
+
         super().__init__(hip, ptr)
 
     @staticmethod
@@ -340,6 +351,19 @@ class HIPGraph(_HIPBase):
         ptr = c_void_p()
         self.hip.lib.hipGraphAddEventRecordNode(ptr, self,
                                                 *self._make_deps(deps), event)
+
+        return ptr.value
+
+    def add_host_func(self, func, arg=None, deps=None):
+        hfunc = CFUNCTYPE(None, py_object)(func)
+        hnode = HIPHostNodeParams(hfunc, arg)
+
+        ptr = c_void_p()
+        self.hip.lib.hipGraphAddHostNode(ptr, self, *self._make_deps(deps),
+                                         hnode)
+
+        # Save a reference to the wrapped function and its argument
+        self.host_funcs.append((hfunc, arg))
 
         return ptr.value
 

@@ -78,6 +78,14 @@ class OpenCLXchgMatrix(OpenCLMatrix, base.XchgMatrix):
 
 
 class OpenCLGraph(base.Graph):
+    def _make_mpi_waitall_impl(self, reqs):
+        super().make_mpi_waitall(reqs)
+
+        kern = object()
+        self.knodes[kern] = reqs
+
+        return kern
+
     def commit(self):
         super().commit()
 
@@ -87,42 +95,54 @@ class OpenCLGraph(base.Graph):
         # Kernel list complete with dependency information
         self.klist = klist = []
 
-        for i, k in enumerate(self.knodes):
+        # MPI wait list
+        self.mpi_waits = mpi_waits = []
+
+        for i, (k, v) in enumerate(self.knodes.items()):
             evtidxs[k] = i
 
-            # Resolve the event indices of kernels we depend on
-            wait_evts = [evtidxs[dep] for dep in self.kdeps[k]] or None
+            # See if the node corresponds to an MPI wait
+            if v is not None:
+                swreqs, reqs = [], v
 
-            klist.append((k, wait_evts, k in self.depk))
+                for r in reqs:
+                    if (rdeps := self.mpi_ireq_deps[id(r)]):
+                        swreqs.append((r, [evtidxs[dep] for dep in rdeps]))
 
-        # Dependent MPI request list
-        self.mreqlist = mreqlist = []
+                if reqs:
+                    mpi_waits.append((swreqs, reqs, i))
+            # Otherwise, it is a regular compute kernel
+            else:
+                # Resolve the event indices of kernels we depend on
+                wait_evts = [evtidxs[dep] for dep in self.kdeps[k]] or None
 
-        for req, deps in zip(self.mpi_reqs, self.mpi_req_deps):
-            if deps:
-                mreqlist.append((req, [evtidxs[dep] for dep in deps]))
+                klist.append((i, k, wait_evts, k in self.depk))
 
     def run(self, queue):
         from mpi4py import MPI
 
-        events = [None]*len(self.klist)
-        wait_for_events = self.backend.cl.wait_for_events
+        cl = self.backend.cl
+        events = [None]*len(self.knodes)
+
+        # Create any necessary user events
+        for reqs, swreqs, ueidx in self.mpi_waits:
+            events[ueidx] = cl.user_event()
 
         # Submit the kernels to the queue
-        for i, (k, wait_for, ret_evt) in enumerate(self.klist):
+        for i, k, wait_for, ret_evt in self.klist:
             if wait_for is not None:
                 wait_for = [events[j] for j in wait_for]
 
             events[i] = k.run(queue, wait_for, ret_evt)
 
         # Start all dependency-free MPI requests
-        if self.mpi_root_reqs:
-            MPI.Prequest.Startall(self.mpi_root_reqs)
+        MPI.Prequest.Startall(self.mpi_root_reqs)
 
-        # Start any remaining requests once their dependencies are satisfied
-        for req, wait_for in self.mreqlist:
-            wait_for_events([events[j] for j in wait_for])
-            req.Start()
+        # Process any remaining requests as their dependencies are satisfied
+        for swreqs, reqs, ueidx in self.mpi_waits:
+            for req, wait_for in swreqs:
+                cl.wait_for_events([events[j] for j in wait_for])
+                req.Start()
 
-        # Wait for all of the MPI requests to finish
-        MPI.Prequest.Waitall(self.mpi_reqs)
+            MPI.Prequest.Waitall(reqs)
+            events[ueidx].complete()

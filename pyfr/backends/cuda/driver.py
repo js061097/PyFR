@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
-from ctypes import (POINTER, Structure, addressof, c_char, c_char_p, c_int,
-                    c_size_t, c_uint, c_ulonglong, c_void_p)
+from ctypes import (CFUNCTYPE, POINTER, Structure, addressof, c_char,
+                    c_char_p, c_int, c_size_t, c_uint, c_ulonglong, c_void_p,
+                    py_object)
 
 import numpy as np
 
@@ -61,6 +62,13 @@ class CUDAKernelNodeParams(Structure):
     def set_args(self, *kargs, start=0):
         for i, v in enumerate(kargs, start=start):
             self.set_arg(i, v)
+
+
+class CUDAHostNodeParams(Structure):
+    _fields_ = [
+        ('func', CFUNCTYPE(None, py_object)),
+        ('data', py_object)
+    ]
 
 
 class CUDAMemcpy3D(Structure):
@@ -168,6 +176,8 @@ class CUDAWrappers(LibWrapper):
           POINTER(c_void_p), c_size_t, c_void_p),
         (c_int, 'cuGraphAddKernelNode', POINTER(c_void_p), c_void_p,
          POINTER(c_void_p), c_size_t, POINTER(CUDAKernelNodeParams)),
+        (c_int, 'cuGraphAddHostNode', POINTER(c_void_p), c_void_p,
+         POINTER(c_void_p), c_size_t, POINTER(CUDAHostNodeParams)),
         (c_int, 'cuGraphAddChildGraphNode', POINTER(c_void_p), c_void_p,
          POINTER(c_void_p), c_size_t, c_void_p),
         (c_int, 'cuGraphAddMemcpyNode', POINTER(c_void_p), c_void_p,
@@ -313,6 +323,8 @@ class CUDAGraph(_CUDABase):
             ptr = c_void_p()
             cuda.lib.cuGraphCreate(ptr, 0)
 
+        self.host_funcs = []
+
         super().__init__(cuda, ptr)
 
     @staticmethod
@@ -332,6 +344,19 @@ class CUDAGraph(_CUDABase):
         ptr = c_void_p()
         self.cuda.lib.cuGraphAddEventRecordNode(ptr, self,
                                                 *self._make_deps(deps), event)
+
+        return ptr.value
+
+    def add_host_func(self, func, arg=None, deps=None):
+        hfunc = CFUNCTYPE(None, py_object)(func)
+        hnode = CUDAHostNodeParams(hfunc, arg)
+
+        ptr = c_void_p()
+        self.cuda.lib.cuGraphAddHostNode(ptr, self, *self._make_deps(deps),
+                                         hnode)
+
+        # Save a reference to the wrapped function and its argument
+        self.host_funcs.append((hfunc, arg))
 
         return ptr.value
 
