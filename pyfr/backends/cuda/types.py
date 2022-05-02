@@ -106,6 +106,7 @@ class CUDAGraph(base.Graph):
         for node, params in self.stale_kparams.items():
             self.exc_graph.set_kernel_node_params(node, params)
 
+        stream.synchronize()
         self.exc_graph.launch(stream)
         self.stale_kparams.clear()
 
@@ -121,6 +122,3 @@ class CUDAGraph(base.Graph):
         # Wait for all of the MPI requests to finish
         if self.mpi_reqs:
             MPI.Prequest.Waitall(self.mpi_reqs)
-
-        # Wait for all of the kernels to finish
-        stream.synchronize()
