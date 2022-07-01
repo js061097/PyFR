@@ -49,7 +49,7 @@ class HIPBlasExtKernels(HIPKernelProvider):
 
         class CopyKernel(HIPKernel):
             def add_to_graph(self, graph, deps):
-                pass
+                return graph.graph.add_memcpy(dst, src, dst.nbytes, deps)
 
             def run(self, stream):
                 hip.memcpy(dst, src, dst.nbytes, stream)

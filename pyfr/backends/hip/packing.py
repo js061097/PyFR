@@ -31,7 +31,7 @@ class HIPPackingKernels(HIPKernelProvider):
         if self.backend.mpitype == 'hip-aware':
             class PackXchgViewKernel(HIPKernel):
                 def add_to_graph(self, graph, deps):
-                    pass
+                    return graph.graph.add_kernel(params, deps)
 
                 def run(self, stream):
                     kern.exec_async(stream, params)
@@ -39,7 +39,10 @@ class HIPPackingKernels(HIPKernelProvider):
         else:
             class PackXchgViewKernel(HIPKernel):
                 def add_to_graph(self, graph, deps):
-                    pass
+                    gpack = graph.graph.add_kernel(params, deps)
+                    return graph.graph.add_memcpy(
+                        m.hdata, m.data, m.nbytes, [gpack]
+                    )
 
                 def run(self, stream):
                     kern.exec_async(stream, params)
@@ -55,7 +58,8 @@ class HIPPackingKernels(HIPKernelProvider):
         else:
             class UnpackXchgMatrixKernel(HIPKernel):
                 def add_to_graph(self, graph, deps):
-                    pass
+                    return graph.graph.add_memcpy(mv.data, mv.hdata, mv.nbytes,
+                                                  deps)
 
                 def run(self, stream):
                     hip.memcpy(mv.data, mv.hdata, mv.nbytes, stream)
