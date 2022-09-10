@@ -57,7 +57,7 @@ class OpenCLBackend(BaseBackend):
         self.csubsz = self.soasz
 
         from pyfr.backends.opencl import (blasext, clblast, gimmik, packing,
-                                          provider, types)
+                                          provider, types, ysmm)
 
         # Register our data types and meta kernels
         self.const_matrix_cls = types.OpenCLConstMatrix
@@ -74,7 +74,8 @@ class OpenCLBackend(BaseBackend):
         kprovs = [provider.OpenCLPointwiseKernelProvider,
                   blasext.OpenCLBlasExtKernels,
                   packing.OpenCLPackingKernels,
-                  gimmik.OpenCLGiMMiKKernels]
+                  #gimmik.OpenCLGiMMiKKernels]
+                  ysmm.OpenCLYSMMKernels]
         self._providers = [k(self) for k in kprovs]
 
         # Load CLBlast if available
